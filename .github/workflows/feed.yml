@@ -4,8 +4,10 @@ on:
     - cron: "*/20 * * * *"   # every 20 minutes
   workflow_dispatch: {}       # manual run button
 
+
 permissions:
   contents: write
+
 
 jobs:
   feed:
@@ -20,12 +22,14 @@ jobs:
         env:
           STEAM_WEB_API_KEY: ${{ secrets.STEAM_WEB_API_KEY }}
         run: |
-          dotnet run --project feedgen -c Release
+          dotnet run --project dayz-feed-repo/feedgen -c Release
       - name: Publish
         run: |
           git config user.name "feed-bot"
           git config user.email "feed-bot@users.noreply.github.com"
+          mkdir -p docs
+          touch docs/.nojekyll
           mv servers.json docs/servers.json
-          git add docs/servers.json
+          git add docs/.nojekyll docs/servers.json
           git commit -m "feed update" || echo "no changes"
           git push
