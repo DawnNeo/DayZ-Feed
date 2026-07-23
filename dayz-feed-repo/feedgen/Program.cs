@@ -240,15 +240,30 @@ var verifiedKept = verified.Where(s => !suspectsBySubnet.Contains(s.Id)).ToList(
 Console.WriteLine($"verified: {verified.Count} (pop-lie convicted: {verified.Count - verifiedKept.Count}), unverified kept: {unverified.Count}");
 
 
-// ---- 4. Dead-end subnet rule for the unverified pile: a dense subnet (25+ listings) where
-//         NOT ONE member answered is a farm or a graveyard either way - dropped. Sparse
-//         subnets and subnets with any verified life keep their unverified rows.
-var verifiedSubnets = new HashSet<string>(verifiedKept.Select(SubnetOf));
-var subnetCounts = byId.Values.GroupBy(SubnetOf).ToDictionary(g => g.Key, g => g.Count());
-var keptUnverified = unverified
-    .Where(s => subnetCounts[SubnetOf(s)] < 25 || verifiedSubnets.Contains(SubnetOf(s)))
-    .ToList();
-Console.WriteLine($"unverified after dead-subnet rule: {keptUnverified.Count}");
+// ---- 4. Farm-subnet rule for the unverified pile. The flood's fingerprint is unmistakable
+//         in the data: /24 subnets carrying THOUSANDS of listings (137.220.56.x had 4,176 -
+//         a /24 only has 256 addresses) that are 0.0% populated. Real hosting racks always
+//         have a populated fraction during active hours; a farm is a wall of empty
+//         registrations. So an unverified 0-player row is dropped only when its /24 is BOTH
+//         dense (25+ listings) AND essentially dead (<3% of its rows have any players) - a
+//         guard that spared 750 real servers on legit racks in testing while still nuking
+//         ~30k flood rows. A row that claims players (The Lab, KarmaKrew: unreachable from
+//         the datacenter but reporting a real crowd) is always kept, as is any verified row.
+var pool = verifiedKept.Concat(unverified).ToList();
+var subnetCounts = pool.GroupBy(SubnetOf).ToDictionary(g => g.Key, g => g.Count());
+var subnetPopFrac = pool.GroupBy(SubnetOf)
+    .ToDictionary(g => g.Key, g => g.Count(s => s.CurrentPlayers > 0) / (double)g.Count());
+
+
+bool IsFarmRow(Server s)
+{
+    string sn = SubnetOf(s);
+    return s.CurrentPlayers == 0 && subnetCounts[sn] >= 25 && subnetPopFrac[sn] < 0.03;
+}
+
+
+var keptUnverified = unverified.Where(s => !IsFarmRow(s)).ToList();
+Console.WriteLine($"unverified after farm-subnet rule: {keptUnverified.Count} (dropped {unverified.Count - keptUnverified.Count})");
 
 
 // ---- 5. Publish. The "mods" field is present ONLY when the rules query answered, so the
@@ -270,7 +285,10 @@ var output = new
         port = s.Port,
         queryPort = s.QueryPort,
         map = s.Map,
-        players = s.CurrentPlayers,
+        // Unverified rows only have SELF-REPORTED counts (the adaptive spam's favorite lie),
+        // so the feed publishes 0 for them - clients rank on verified reality only, and each
+        // user's local sweep supplies the real number the moment the row is looked at.
+        players = s.PopVerified ? s.CurrentPlayers : 0,
         maxPlayers = s.MaxPlayers,
         official = s.IsOfficial,
         passworded = s.RequiresPassword,
@@ -285,8 +303,6 @@ File.WriteAllText("servers.json", JsonSerializer.Serialize(output,
     new JsonSerializerOptions { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull }));
 Console.WriteLine($"servers.json written: {all.Count} servers");
 return verifiedKept.Count > 500 ? 0 : 2; // refuse to publish an implausibly small list
-
-
 
 
 
