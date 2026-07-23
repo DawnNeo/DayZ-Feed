@@ -3,6 +3,9 @@ on:
   schedule:
     - cron: "*/20 * * * *"   # every 20 minutes
   workflow_dispatch: {}       # manual run button
+concurrency:
+  group: feed
+  cancel-in-progress: false
 
 
 permissions:
