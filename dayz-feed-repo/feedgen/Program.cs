@@ -124,7 +124,7 @@ Console.WriteLine($"template-convicted: {convicted.Count}");
 var a2s = new A2SQueryService();
 var survivors = byId.Values.Where(s => !convicted.Contains(s.Id)).ToList();
 var verified = new ConcurrentBag<Server>();
-using var throttle = new SemaphoreSlim(64);
+using var throttle = new SemaphoreSlim(192);
 
 await Task.WhenAll(survivors.Select(async srv =>
 {
