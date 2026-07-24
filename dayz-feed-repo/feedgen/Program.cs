@@ -309,4 +309,112 @@ var output = new
 File.WriteAllText("servers.json", JsonSerializer.Serialize(output,
     new JsonSerializerOptions { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull }));
 Console.WriteLine($"servers.json written: {all.Count} servers");
+
+
+// ---- 6. Population history, recorded by US - this is how BattleMetrics-style charts exist
+//         without BattleMetrics: every run appends each VERIFIED server's measured count.
+//         The workflow checks prior state out into ./history (the repo's force-pushed "data"
+//         branch, always a single commit so the repo never bloats) and pushes ./history-out.
+//         Retention: 48h at run resolution ("fine") + 30 daily aggregates (sum,count,peak).
+try
+{
+    const int ShardCount = 40;
+    static int ShardOf(string id)
+    {
+        int h = 0;
+        foreach (byte b in System.Text.Encoding.UTF8.GetBytes(id)) h = (h + b) % 40;
+        return h;
+    }
+
+
+    long nowMin = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 60000;
+    long fineCutoff = nowMin - 48 * 60;
+    string today = DateTime.UtcNow.ToString("yyyy-MM-dd");
+    Directory.CreateDirectory("history-out");
+
+
+    var byShard = verifiedKept.GroupBy(s => ShardOf(s.Id)).ToDictionary(g => g.Key, g => g.ToList());
+
+
+    for (int shard = 0; shard < ShardCount; shard++)
+    {
+        var root = new System.Text.Json.Nodes.JsonObject();
+        var servers = new System.Text.Json.Nodes.JsonObject();
+        string prior = Path.Combine("history", $"s{shard:D2}.json");
+        if (File.Exists(prior))
+        {
+            try
+            {
+                var parsed = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(prior)) as System.Text.Json.Nodes.JsonObject;
+                if (parsed?["servers"] is System.Text.Json.Nodes.JsonObject prev)
+                {
+                    servers = prev;
+                    parsed.Remove("servers");
+                }
+            }
+            catch { /* corrupted shard - start it fresh */ }
+        }
+
+
+        if (byShard.TryGetValue(shard, out var members))
+        {
+            foreach (var srv in members)
+            {
+                if (servers[srv.Id] is not System.Text.Json.Nodes.JsonObject entry)
+                {
+                    entry = new System.Text.Json.Nodes.JsonObject
+                    {
+                        ["f"] = new System.Text.Json.Nodes.JsonArray(),
+                        ["d"] = new System.Text.Json.Nodes.JsonArray(),
+                    };
+                    servers[srv.Id] = entry;
+                }
+
+
+                var fine = entry["f"] as System.Text.Json.Nodes.JsonArray ?? new System.Text.Json.Nodes.JsonArray();
+                fine.Add(new System.Text.Json.Nodes.JsonArray { nowMin, srv.CurrentPlayers });
+                while (fine.Count > 0 && fine[0] is System.Text.Json.Nodes.JsonArray first &&
+                       (long)(first[0] ?? 0L) < fineCutoff)
+                {
+                    fine.RemoveAt(0);
+                }
+                entry["f"] = fine;
+
+
+                var daily = entry["d"] as System.Text.Json.Nodes.JsonArray ?? new System.Text.Json.Nodes.JsonArray();
+                System.Text.Json.Nodes.JsonArray? todayRow = null;
+                if (daily.Count > 0 && daily[^1] is System.Text.Json.Nodes.JsonArray lastRow &&
+                    (string?)lastRow[0] == today)
+                {
+                    todayRow = lastRow;
+                }
+                if (todayRow == null)
+                {
+                    todayRow = new System.Text.Json.Nodes.JsonArray { today, 0L, 0L, 0L };
+                    daily.Add(todayRow);
+                    while (daily.Count > 30) daily.RemoveAt(0);
+                }
+                todayRow[1] = (long)(todayRow[1] ?? 0L) + srv.CurrentPlayers;
+                todayRow[2] = (long)(todayRow[2] ?? 0L) + 1;
+                todayRow[3] = Math.Max((long)(todayRow[3] ?? 0L), srv.CurrentPlayers);
+                entry["d"] = daily;
+            }
+        }
+
+
+        root["servers"] = servers;
+        File.WriteAllText(Path.Combine("history-out", $"s{shard:D2}.json"), root.ToJsonString());
+    }
+    Console.WriteLine($"history shards written for {verifiedKept.Count} verified servers");
+}
+catch (Exception ex)
+{
+    Console.Error.WriteLine($"history update failed (non-fatal): {ex.Message}");
+}
+
+
 return verifiedKept.Count > 500 ? 0 : 2; // refuse to publish an implausibly small list
+
+
+
+
