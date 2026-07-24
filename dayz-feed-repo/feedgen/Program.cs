@@ -303,7 +303,3 @@ File.WriteAllText("servers.json", JsonSerializer.Serialize(output,
     new JsonSerializerOptions { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull }));
 Console.WriteLine($"servers.json written: {all.Count} servers");
 return verifiedKept.Count > 500 ? 0 : 2; // refuse to publish an implausibly small list
-
-
-
-
