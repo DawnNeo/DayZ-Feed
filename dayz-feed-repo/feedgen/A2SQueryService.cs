@@ -7,11 +7,13 @@ using System.Text;
 using System.Threading.Tasks;
 using DayZLauncher.Models;
 
+
 namespace DayZLauncher.Services
 {
     public class A2SQueryService
     {
         private static readonly byte[] RequestHeader = { 0xFF, 0xFF, 0xFF, 0xFF, 0x54, 0x53, 0x6F, 0x75, 0x72, 0x63, 0x65, 0x20, 0x45, 0x6E, 0x67, 0x69, 0x6E, 0x65, 0x20, 0x51, 0x75, 0x65, 0x72, 0x79, 0x00 };
+
 
         /// <summary>
         /// Sends an A2S_INFO query and returns what the server reported.
@@ -29,14 +31,17 @@ namespace DayZLauncher.Services
         {
             Server result = MakeOffline(ipAddress, queryPort);
 
+
             for (int attempt = 0; attempt < Math.Max(1, attempts); attempt++)
             {
                 result = await QueryOnceAsync(ipAddress, queryPort, timeoutMs);
                 if (result.IsOnline) return result;
             }
 
+
             return result;
         }
+
 
         private static Server MakeOffline(string ipAddress, int queryPort) => new()
         {
@@ -47,9 +52,11 @@ namespace DayZLauncher.Services
             IsOnline = false
         };
 
+
         private async Task<Server> QueryOnceAsync(string ipAddress, int queryPort, int timeoutMs)
         {
             var server = MakeOffline(ipAddress, queryPort);
+
 
             if (!IPAddress.TryParse(ipAddress, out var ip))
             {
@@ -65,24 +72,31 @@ namespace DayZLauncher.Services
                 }
             }
 
+
             var endPoint = new IPEndPoint(ip, queryPort);
             using var udpClient = new UdpClient();
             udpClient.Client.SendTimeout = timeoutMs;
             udpClient.Client.ReceiveTimeout = timeoutMs;
 
+
             var stopwatch = Stopwatch.StartNew();
+
 
             try
             {
                 await udpClient.SendAsync(RequestHeader, RequestHeader.Length, endPoint);
 
+
                 byte[]? data = await ReceiveWithTimeoutAsync(udpClient, timeoutMs);
                 if (data == null) return server; // timed out
+
 
                 stopwatch.Stop();
                 server.Ping = (int)stopwatch.ElapsedMilliseconds;
 
+
                 if (data.Length < 5) return server;
+
 
                 // A challenge means "ask again, but include this token". The old code re-sent the
                 // request but then kept reading from the *original* buffer, so it parsed the
@@ -96,17 +110,22 @@ namespace DayZLauncher.Services
                     Buffer.BlockCopy(RequestHeader, 0, challengeRequest, 0, RequestHeader.Length);
                     Buffer.BlockCopy(data, 5, challengeRequest, RequestHeader.Length, 4);
 
+
                     stopwatch.Restart();
                     await udpClient.SendAsync(challengeRequest, challengeRequest.Length, endPoint);
 
+
                     data = await ReceiveWithTimeoutAsync(udpClient, timeoutMs);
                     if (data == null || data.Length < 5) return server;
+
 
                     stopwatch.Stop();
                     server.Ping = (int)stopwatch.ElapsedMilliseconds;
                 }
 
+
                 if (GetResponseType(data) != 0x49) return server;
+
 
                 ParseInfoResponse(data, server);
             }
@@ -115,8 +134,10 @@ namespace DayZLauncher.Services
                 Debug.WriteLine($"A2S query error on {ipAddress}:{queryPort}: {ex.Message}");
             }
 
+
             return server;
         }
+
 
         /// <summary>
         /// Reads one datagram, giving up after <paramref name="timeoutMs"/>. Split ("multi-packet")
@@ -128,32 +149,40 @@ namespace DayZLauncher.Services
             var receiveTask = client.ReceiveAsync();
             var timeoutTask = Task.Delay(timeoutMs);
 
+
             // Both tasks are held in locals: the old code compared the completed task against a
             // freshly-created Task.Delay, which is never the same object, so the timeout branch
             // could never be taken.
             var completed = await Task.WhenAny(receiveTask, timeoutTask);
             if (completed != receiveTask) return null;
 
+
             var result = await receiveTask;
             byte[] buffer = result.Buffer;
+
 
             if (buffer.Length < 5) return null;
             // 0xFFFFFFFF is a single-packet response; 0xFFFFFFFE marks a split one.
             if (BitConverter.ToInt32(buffer, 0) != -1) return null;
 
+
             return buffer;
         }
 
+
         private static byte GetResponseType(byte[] data) => data.Length >= 5 ? data[4] : (byte)0;
+
 
         private void ParseInfoResponse(byte[] data, Server server)
         {
             using var ms = new MemoryStream(data);
             using var reader = new BinaryReader(ms);
 
+
             reader.ReadInt32();          // header (0xFFFFFFFF)
             reader.ReadByte();           // response type (0x49)
             reader.ReadByte();           // protocol version
+
 
             server.IsOnline = true;
             server.Name = ReadNullTerminatedString(reader);
@@ -169,7 +198,9 @@ namespace DayZLauncher.Services
             reader.ReadByte();                // visibility (password required)
             reader.ReadByte();                // VAC
 
+
             server.GameVersion = ReadNullTerminatedString(reader);
+
 
             // Extra Data Flag block - DayZ publishes its mod list in the keywords field.
             if (ms.Position < ms.Length)
@@ -197,6 +228,7 @@ namespace DayZLauncher.Services
             }
         }
 
+
         /// <summary>
         /// Reads a null-terminated A2S string, decoding as UTF-8. The old cast-each-byte-to-char
         /// approach mangled any server name containing non-ASCII characters, which is extremely
@@ -220,6 +252,7 @@ namespace DayZLauncher.Services
             return Encoding.UTF8.GetString(bytes.ToArray());
         }
 
+
         private void ParseKeywordsForMods(string keywords, Server server)
         {
             // DayZ servers publish details in the keyword field, usually comma-separated, with
@@ -227,7 +260,23 @@ namespace DayZLauncher.Services
             //   "mod:1559212036,2233971631,2285132641,g:1.25,pvp,firstperson"
             if (string.IsNullOrEmpty(keywords)) return;
 
+
+            // Login-queue size rides along as "lqsN" - the number of players waiting to get in.
+            var lqs = System.Text.RegularExpressions.Regex.Match(keywords, @"\blqs(\d+)\b");
+            if (lqs.Success && int.TryParse(lqs.Groups[1].Value, out int queue))
+            {
+                server.QueueSize = queue;
+            }
+
+
+            // Camera perspective: DayZ advertises "no3rd" when third person is disabled, so a
+            // keywords answer that lacks it is a positive "3PP allowed" statement, not silence.
+            server.IsFirstPersonOnly = System.Text.RegularExpressions.Regex.IsMatch(keywords, @"\bno3rd\b");
+            server.PerspectiveKnown = true;
+
+
             var mods = new System.Collections.Generic.List<string>(server.RequiredMods);
+
 
             string[] tokens = keywords.Split(',', ';');
             foreach (var token in tokens)
@@ -251,10 +300,13 @@ namespace DayZLauncher.Services
                 }
             }
 
+
             server.RequiredMods = mods;
         }
 
+
         #region A2S_RULES - DayZ mod list
+
 
         /// <summary>
         /// Asks the server itself for its mod list via A2S_RULES. DayZ packs the list into the
@@ -270,6 +322,7 @@ namespace DayZLauncher.Services
         {
             var none = (new System.Collections.Generic.List<string>(), new System.Collections.Generic.List<string>(), false);
 
+
             // Same retry policy as the info query: the exchange is several datagrams long and
             // losing any one of them (routinely, on UDP) must not read as "no mods".
             for (int attempt = 0; attempt < Math.Max(1, attempts); attempt++)
@@ -280,15 +333,19 @@ namespace DayZLauncher.Services
             return none;
         }
 
+
         private async Task<(System.Collections.Generic.List<string> Ids, System.Collections.Generic.List<string> Names, bool Ok)> QueryModsOnceAsync(
             string ipAddress, int queryPort, int timeoutMs)
         {
             var none = (new System.Collections.Generic.List<string>(), new System.Collections.Generic.List<string>(), false);
 
+
             if (!IPAddress.TryParse(ipAddress, out var ip)) return none;
             var endPoint = new IPEndPoint(ip, queryPort);
 
+
             using var udpClient = new UdpClient();
+
 
             try
             {
@@ -297,8 +354,10 @@ namespace DayZLauncher.Services
                 byte[] request = { 0xFF, 0xFF, 0xFF, 0xFF, 0x56, 0xFF, 0xFF, 0xFF, 0xFF };
                 await udpClient.SendAsync(request, request.Length, endPoint);
 
+
                 byte[]? data = await ReceiveWithTimeoutAsync(udpClient, timeoutMs);
                 if (data == null || data.Length < 9) return none;
+
 
                 // Only a single-packet (-1) reply can be a challenge; on a split (-2) reply
                 // byte 4 is part of the fragment id and matching it against 0x41 is noise.
@@ -311,8 +370,10 @@ namespace DayZLauncher.Services
                     if (data == null || data.Length < 5) return none;
                 }
 
+
                 byte[]? payload = await ReassembleAsync(udpClient, data, timeoutMs);
                 if (payload == null || payload.Length < 7 || payload[4] != 0x45) return none;
+
 
                 return ParseDayZRules(payload);
             }
@@ -322,6 +383,7 @@ namespace DayZLauncher.Services
                 return none;
             }
         }
+
 
         /// <summary>
         /// Counts the entries a server actually lists via A2S_PLAYER. Fake near-cap listings
@@ -340,19 +402,23 @@ namespace DayZLauncher.Services
             return -1;
         }
 
+
         private async Task<int> QueryPlayerListOnceAsync(string ipAddress, int queryPort, int timeoutMs)
         {
             if (!IPAddress.TryParse(ipAddress, out var ip)) return -1;
             var endPoint = new IPEndPoint(ip, queryPort);
             using var udpClient = new UdpClient();
 
+
             try
             {
                 byte[] request = { 0xFF, 0xFF, 0xFF, 0xFF, 0x55, 0xFF, 0xFF, 0xFF, 0xFF };
                 await udpClient.SendAsync(request, request.Length, endPoint);
 
+
                 byte[]? data = await ReceiveWithTimeoutAsync(udpClient, timeoutMs);
                 if (data == null || data.Length < 5) return -1;
+
 
                 for (int round = 0; round < 2 && data.Length >= 9 &&
                      BitConverter.ToInt32(data, 0) == -1 && GetResponseType(data) == 0x41; round++)
@@ -363,8 +429,10 @@ namespace DayZLauncher.Services
                     if (data == null || data.Length < 5) return -1;
                 }
 
+
                 byte[]? payload = await ReassembleAsync(udpClient, data, timeoutMs);
                 if (payload == null || payload.Length < 6 || payload[4] != 0x44) return -1;
+
 
                 // Count the entries actually present ([index u8][name cstr][score i32][time f32])
                 // rather than trusting the count byte, which a liar controls too.
@@ -385,6 +453,7 @@ namespace DayZLauncher.Services
             }
         }
 
+
         /// <summary>
         /// Handles Source-engine split responses (header -2). A modded DayZ rules reply rarely
         /// fits one datagram, so fragments are collected, ordered by their sequence number and
@@ -396,34 +465,42 @@ namespace DayZLauncher.Services
             if (header == -1) return first;
             if (header != -2) return null;
 
+
             var fragments = new System.Collections.Generic.SortedDictionary<int, byte[]>();
             int total;
             byte[] packet = first;
+
 
             while (true)
             {
                 if (packet.Length < 12 || BitConverter.ToInt32(packet, 0) != -2) return null;
 
+
                 int id = BitConverter.ToInt32(packet, 4);
                 if ((id & unchecked((int)0x80000000)) != 0) return null; // bz2-compressed - not used by DayZ
+
 
                 total = packet[8];
                 int number = packet[9];
                 // Source split header ends with a u16 max-fragment-size before the payload.
                 fragments[number] = packet[12..];
 
+
                 if (fragments.Count >= total) break;
+
 
                 byte[]? next = await ReceiveWithTimeoutAsync(client, timeoutMs);
                 if (next == null) return null;
                 packet = next;
             }
 
+
             using var ms = new MemoryStream();
             foreach (var kv in fragments) ms.Write(kv.Value);
             byte[] whole = ms.ToArray();
             return whole.Length >= 5 && BitConverter.ToInt32(whole, 0) == -1 ? whole : null;
         }
+
 
         /// <summary>
         /// Decodes DayZ's binary rules payload. The mod list is spread across rules whose keys
@@ -438,16 +515,19 @@ namespace DayZLauncher.Services
             var ids = new System.Collections.Generic.List<string>();
             var names = new System.Collections.Generic.List<string>();
 
+
             // Split the standard A2S_RULES framing: u16 rule count, then per rule a
             // null-terminated key and null-terminated value - both raw bytes here.
             int pos = 7; // 4 header + 0x45 + u16 count
             int count = BitConverter.ToUInt16(payload, 5);
             var binaryRules = new System.Collections.Generic.SortedDictionary<int, byte[]>();
 
+
             for (int i = 0; i < count && pos < payload.Length; i++)
             {
                 byte[] key = ReadRawCString(payload, ref pos);
                 byte[] value = ReadRawCString(payload, ref pos);
+
 
                 // DayZ's data rules have exactly two raw bytes as their key; anything longer is
                 // an ordinary text rule (allowedBuild etc.) and irrelevant here.
@@ -457,11 +537,14 @@ namespace DayZLauncher.Services
                 }
             }
 
+
             if (binaryRules.Count == 0) return (ids, names, false);
+
 
             using var ms = new MemoryStream();
             foreach (var kv in binaryRules) ms.Write(kv.Value);
             byte[] blob = Unescape(ms.ToArray());
+
 
             try
             {
@@ -469,25 +552,31 @@ namespace DayZLauncher.Services
                 byte version = blob[p++];
                 if (version != 2) return (ids, names, false);
 
+
                 p++; // overflow flags
+
 
                 ushort dlcFlags = (ushort)(blob[p] | (blob[p + 1] << 8));
                 p += 2;
                 p += 4 * System.Numerics.BitOperations.PopCount(dlcFlags); // one u32 per DLC
+
 
                 byte modCount = blob[p++];
                 for (int i = 0; i < modCount; i++)
                 {
                     p += 4; // per-mod hash
 
+
                     int idLen = blob[p++] & 0x0F;
                     ulong workshopId = 0;
                     for (int b = 0; b < idLen; b++) workshopId |= (ulong)blob[p + b] << (8 * b);
                     p += idLen;
 
+
                     int nameLen = blob[p++];
                     string name = Encoding.UTF8.GetString(blob, p, nameLen);
                     p += nameLen;
+
 
                     if (workshopId > 0)
                     {
@@ -495,6 +584,7 @@ namespace DayZLauncher.Services
                         names.Add(name);
                     }
                 }
+
 
                 return (ids, names, true);
             }
@@ -508,6 +598,7 @@ namespace DayZLauncher.Services
             }
         }
 
+
         private static byte[] ReadRawCString(byte[] data, ref int pos)
         {
             int start = pos;
@@ -516,6 +607,7 @@ namespace DayZLauncher.Services
             if (pos < data.Length) pos++; // consume the terminator
             return result;
         }
+
 
         /// <summary>Single-pass unescape - a chained string replace corrupts payloads where an
         /// escaped 0x01 is followed by a literal 0x02 or 0x03.</summary>
@@ -536,6 +628,11 @@ namespace DayZLauncher.Services
             return ms.ToArray();
         }
 
+
         #endregion
     }
 }
+
+
+
+
