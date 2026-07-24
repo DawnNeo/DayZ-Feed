@@ -6,7 +6,13 @@ using DayZLauncher.Services;
 
 
 // ---------------------------------------------------------------------------------------------
-// DayZ server-feed generator v2. Runs on a schedule (GitHub Action), produces servers.json.
+// DayZ server-feed generator v4. Runs on a schedule (GitHub Action), produces servers.json.
+//
+// v4: two optional per-row fields. "cc" - country code resolved from the server's IP against
+// the public-domain (CC0/PDDL) geo-whois-asn-country dataset, downloaded fresh each run, so
+// the launcher's region filter needs no keys and no per-user lookups. "fpp" - true when the
+// server's gametype tags carry "no3rd" (first-person only); present only when tags were seen,
+// so absence means "unknown", never "3PP".
 //
 // v2 policy change: a server the runner cannot reach is NOT dropped anymore. Datacenter
 // reachability is not player reachability - strict firewalls and long routes made v1 silently
@@ -64,6 +70,7 @@ async Task<int> Enumerate(string filter)
 
 
             int players = e.TryGetProperty("players", out var p) ? p.GetInt32() : 0;
+            string gametype = e.TryGetProperty("gametype", out var gt) ? gt.GetString() ?? "" : "";
             byId[id] = new Server
             {
                 Id = id,
@@ -75,10 +82,14 @@ async Task<int> Enumerate(string filter)
                 CurrentPlayers = players > 127 ? 0 : players,
                 MaxPlayers = e.TryGetProperty("max_players", out var mp) ? mp.GetInt32() : 0,
                 GameVersion = e.TryGetProperty("version", out var v) ? v.GetString() ?? "" : "",
-                IsOfficial = e.TryGetProperty("gametype", out var gt) &&
-                             System.Text.RegularExpressions.Regex.IsMatch(gt.GetString() ?? "", @"shard\d{3}(,|$)") &&
-                             !(gt.GetString() ?? "").Contains("external", StringComparison.OrdinalIgnoreCase) &&
-                             !(gt.GetString() ?? "").Contains("privHive", StringComparison.OrdinalIgnoreCase),
+                IsOfficial = gametype.Length > 0 &&
+                             System.Text.RegularExpressions.Regex.IsMatch(gametype, @"shard\d{3}(,|$)") &&
+                             !gametype.Contains("external", StringComparison.OrdinalIgnoreCase) &&
+                             !gametype.Contains("privHive", StringComparison.OrdinalIgnoreCase),
+                // Perspective rides in the same tags: "no3rd" = first person only. Tags being
+                // present at all is what makes "no no3rd" a real 3PP statement, not silence.
+                IsFirstPersonOnly = System.Text.RegularExpressions.Regex.IsMatch(gametype, @"\bno3rd\b"),
+                PerspectiveKnown = gametype.Length > 0,
             };
             added++;
         }
@@ -115,6 +126,71 @@ foreach (var map in byId.Values
 
 
 Console.WriteLine($"enumerated (deduped): {byId.Count}");
+
+
+// ---- 1b. Country per server, resolved from its IP against the geo-whois-asn-country
+//          dataset (CC0/PDDL - public domain, no keys, no attribution requirement, freely
+//          redistributable). Downloaded fresh each run; a failed download just means this
+//          run's feed ships without "cc" and the launcher's region filter sits idle.
+try
+{
+    static uint IpNum(string ip)
+    {
+        var o = ip.Split('.');
+        if (o.Length != 4) return 0;
+        return byte.TryParse(o[0], out var a) && byte.TryParse(o[1], out var b) &&
+               byte.TryParse(o[2], out var c) && byte.TryParse(o[3], out var d)
+            ? ((uint)a << 24) | ((uint)b << 16) | ((uint)c << 8) | d
+            : 0;
+    }
+
+
+    string csv = await http.GetStringAsync(
+        "https://cdn.jsdelivr.net/npm/@ip-location-db/geo-whois-asn-country/geo-whois-asn-country-ipv4-num.csv");
+
+
+    // Rows are "startNum,endNum,CC", sorted ascending and non-overlapping.
+    var starts = new List<uint>(300_000);
+    var ends = new List<uint>(300_000);
+    var codes = new List<string>(300_000);
+    foreach (var line in csv.Split('\n'))
+    {
+        var parts = line.Trim().Split(',');
+        if (parts.Length < 3) continue;
+        if (!uint.TryParse(parts[0], out var s) || !uint.TryParse(parts[1], out var en)) continue;
+        starts.Add(s);
+        ends.Add(en);
+        codes.Add(parts[2].Trim().ToUpperInvariant());
+    }
+
+
+    int resolved = 0;
+    foreach (var srv in byId.Values)
+    {
+        uint n = IpNum(srv.Ip);
+        if (n == 0) continue;
+
+
+        // Binary search for the last range starting at or below n, then bounds-check it.
+        int lo = 0, hi = starts.Count - 1, hit = -1;
+        while (lo <= hi)
+        {
+            int mid = (lo + hi) / 2;
+            if (starts[mid] <= n) { hit = mid; lo = mid + 1; }
+            else hi = mid - 1;
+        }
+        if (hit >= 0 && n <= ends[hit] && codes[hit].Length == 2)
+        {
+            srv.Country = codes[hit];
+            resolved++;
+        }
+    }
+    Console.WriteLine($"country resolved: {resolved}/{byId.Count} ({starts.Count:N0} ranges)");
+}
+catch (Exception ex)
+{
+    Console.Error.WriteLine($"country resolution failed (non-fatal): {ex.Message}");
+}
 
 
 // ---- 2. Convict the procedural-name flood (same tail-signature rule the launcher uses).
@@ -171,6 +247,11 @@ var candidates = byId.Values.Where(s => !convicted.Contains(s.Id)).ToList();
 var verified = new ConcurrentBag<Server>();
 var unverified = new ConcurrentBag<Server>();
 var popSuspects = new ConcurrentBag<string>();
+// Claim-20+ rows whose player-list check got NO answer during the storm. The storm runs
+// 192 queries wide, so a lost UDP exchange reads as innocent silence - and the July 2026
+// flood wave hid ~1,700 fabricated-population rows behind exactly that: they answer the
+// info query instantly but their player-list lie only surfaces on a calm retry.
+var silentClaimers = new ConcurrentBag<Server>();
 using var throttle = new SemaphoreSlim(192);
 
 
@@ -196,6 +277,12 @@ await Task.WhenAll(candidates.Select(async srv =>
         if (!string.IsNullOrWhiteSpace(live.Name)) srv.Name = live.Name;
         if (!string.IsNullOrWhiteSpace(live.GameVersion)) srv.GameVersion = live.GameVersion;
         srv.RequiresPassword = live.RequiresPassword;
+        // The server's own keywords answer outranks the master list's tags.
+        if (live.PerspectiveKnown)
+        {
+            srv.IsFirstPersonOnly = live.IsFirstPersonOnly;
+            srv.PerspectiveKnown = true;
+        }
 
 
         if (srv.CurrentPlayers >= 20)
@@ -216,6 +303,10 @@ await Task.WhenAll(candidates.Select(async srv =>
             {
                 popSuspects.Add(srv.Id);
             }
+            else if (listed < 0)
+            {
+                silentClaimers.Add(srv); // re-heard calmly below; silence is never punished
+            }
         }
 
 
@@ -231,20 +322,67 @@ await Task.WhenAll(candidates.Select(async srv =>
 }));
 
 
+// R1: calm re-hearing for claim-20+ rows whose player-list went unanswered in the storm.
+// Low concurrency and a generous timeout, so a lost exchange can't hide the lie; the
+// evidence rule is UNCHANGED - only an actual answer with nobody in it convicts.
+{
+    using var calm = new SemaphoreSlim(24);
+    int reheard = 0, caught = 0;
+    await Task.WhenAll(silentClaimers.Select(async srv =>
+    {
+        await calm.WaitAsync();
+        try
+        {
+            int listed = await a2s.QueryPlayerListCountAsync(srv.Ip, srv.EffectiveQueryPort, timeoutMs: 2500);
+            if (listed < 0)
+            {
+                listed = await a2s.QueryPlayerListCountAsync(srv.Ip, srv.EffectiveQueryPort, timeoutMs: 2500);
+            }
+            Interlocked.Increment(ref reheard);
+            if (listed >= 0 && listed < 5)
+            {
+                popSuspects.Add(srv.Id);
+                Interlocked.Increment(ref caught);
+            }
+        }
+        catch { }
+        finally { calm.Release(); }
+    }));
+    Console.WriteLine($"calm re-hearing: {reheard} silent claimers re-queried, {caught} answered-with-nobody");
+}
+
+
+// R2: impossible capacity. DayZ's engine hard-caps a server at 127 survivors, so a row
+// CLAIMING players in a "130/200/255-slot" server is lying by physics - the July flood
+// stamps 130-220 on its listings while every real franchise tops out at exactly 127.
+// Empty rows with a big max are left alone (a misconfigured cfg is not a lie until the
+// row claims a crowd it cannot hold).
+int impossible = 0;
+foreach (var s in verified.Concat(unverified))
+{
+    if (s.CurrentPlayers > 0 && s.MaxPlayers > 127)
+    {
+        popSuspects.Add(s.Id);
+        impossible++;
+    }
+}
+Console.WriteLine($"impossible-capacity claims: {impossible}");
+
+
 // Corroborated population-lie convictions: a suspicious row (big claim, no producible
-// player list) is dropped only when 10+ suspects share its /24 - the signature of a farm,
-// not of one privacy-minded host.
+// player list - or a physically impossible one) is dropped only when 2+ suspects share
+// its /24 - the signature of a farm pod, not of one privacy-minded host. Applies to the
+// unverified pile too: heartbeat-only listings are where the flood parks its bulk.
 var suspectSet = new HashSet<string>(popSuspects, StringComparer.OrdinalIgnoreCase);
-// Two confirmed answered-with-nobody liars on one /24 convicts the cluster - this spam
-// operates in pods (a "TITAN/TEMPEST" pod of 8 listings ducked the old 10+ threshold and
-// shipped in the feed as verified rows with fabricated populations).
-var suspectsBySubnet = verified.Where(s => suspectSet.Contains(s.Id))
+var suspectsBySubnet = verified.Concat(unverified).Where(s => suspectSet.Contains(s.Id))
     .GroupBy(SubnetOf)
     .Where(g => g.Count() >= 2)
     .SelectMany(g => g.Select(s => s.Id))
     .ToHashSet(StringComparer.OrdinalIgnoreCase);
 var verifiedKept = verified.Where(s => !suspectsBySubnet.Contains(s.Id)).ToList();
-Console.WriteLine($"verified: {verified.Count} (pop-lie convicted: {verified.Count - verifiedKept.Count}), unverified kept: {unverified.Count}");
+var unverifiedAfterCluster = unverified.Where(s => !suspectsBySubnet.Contains(s.Id)).ToList();
+Console.WriteLine($"verified: {verified.Count} (pop-lie convicted: {verified.Count - verifiedKept.Count}), " +
+                  $"unverified: {unverified.Count} (pop-lie convicted: {unverified.Count - unverifiedAfterCluster.Count})");
 
 
 // ---- 4. Farm-subnet rule for the unverified pile. The flood's fingerprint is unmistakable
@@ -256,21 +394,26 @@ Console.WriteLine($"verified: {verified.Count} (pop-lie convicted: {verified.Cou
 //         guard that spared 750 real servers on legit racks in testing while still nuking
 //         ~30k flood rows. A row that claims players (The Lab, KarmaKrew: unreachable from
 //         the datacenter but reporting a real crowd) is always kept, as is any verified row.
-var pool = verifiedKept.Concat(unverified).ToList();
+var pool = verifiedKept.Concat(unverifiedAfterCluster).ToList();
 var subnetCounts = pool.GroupBy(SubnetOf).ToDictionary(g => g.Key, g => g.Count());
+// The populated fraction counts only CREDIBLE population: a claim with an impossible
+// capacity is not population. The flood defeated the v3 version of this rule by simply
+// claiming players in its heartbeats - free lies must not keep a farm subnet "alive".
 var subnetPopFrac = pool.GroupBy(SubnetOf)
-    .ToDictionary(g => g.Key, g => g.Count(s => s.CurrentPlayers > 0) / (double)g.Count());
+    .ToDictionary(g => g.Key, g => g.Count(s => s.CurrentPlayers > 0 && s.MaxPlayers <= 127) / (double)g.Count());
 
 
 bool IsFarmRow(Server s)
 {
     string sn = SubnetOf(s);
-    return s.CurrentPlayers == 0 && subnetCounts[sn] >= 25 && subnetPopFrac[sn] < 0.03;
+    // A row with an impossible capacity gets no claims-players exemption either.
+    return (s.CurrentPlayers == 0 || s.MaxPlayers > 127) &&
+           subnetCounts[sn] >= 25 && subnetPopFrac[sn] < 0.03;
 }
 
 
-var keptUnverified = unverified.Where(s => !IsFarmRow(s)).ToList();
-Console.WriteLine($"unverified after farm-subnet rule: {keptUnverified.Count} (dropped {unverified.Count - keptUnverified.Count})");
+var keptUnverified = unverifiedAfterCluster.Where(s => !IsFarmRow(s)).ToList();
+Console.WriteLine($"unverified after farm-subnet rule: {keptUnverified.Count} (dropped {unverifiedAfterCluster.Count - keptUnverified.Count})");
 
 
 // ---- 5. Publish. The "mods" field is present ONLY when the rules query answered, so the
@@ -294,14 +437,19 @@ var output = new
         map = s.Map,
         // Unverified rows only have SELF-REPORTED counts (the adaptive spam's favorite lie),
         // so the feed publishes 0 for them - clients rank on verified reality only, and each
-        // user's local sweep supplies the real number the moment the row is looked at.
-        players = s.PopVerified ? s.CurrentPlayers : 0,
+        // user's local sweep supplies the real number the moment the row is looked at. A
+        // count in an impossible-capacity server (max > the 127 engine cap) is zeroed too.
+        players = s.PopVerified && s.MaxPlayers <= 127 ? s.CurrentPlayers : 0,
         maxPlayers = s.MaxPlayers,
         official = s.IsOfficial,
         passworded = s.RequiresPassword,
         version = s.GameVersion,
         verified = s.PopVerified,
         mods = s.ModsVerified ? s.RequiredMods : null,
+        // Optional v4 fields (omitted when unknown, thanks to WhenWritingNull below):
+        // country code from the IP, and the first-person-only flag from the "no3rd" tag.
+        cc = string.IsNullOrEmpty(s.Country) ? null : s.Country,
+        fpp = s.PerspectiveKnown ? s.IsFirstPersonOnly : (bool?)null,
     }),
 };
 
