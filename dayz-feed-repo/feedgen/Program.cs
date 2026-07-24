@@ -208,7 +208,11 @@ await Task.WhenAll(candidates.Select(async srv =>
             // a lone server that hides its player list survives, a rack of fake-populated
             // listings does not.
             int listed = await a2s.QueryPlayerListCountAsync(srv.Ip, srv.EffectiveQueryPort, timeoutMs: 1500);
-            if (listed < 5)
+            // ANSWERED with nobody = the fake signature. Silence stays innocent (plenty of
+            // real hosts block this query outright) - the same field-proven taxonomy the
+            // launcher uses: real populated servers answer WITH entries, privacy hosts answer
+            // NOTHING, only fakes answer WITH NOBODY.
+            if (listed >= 0 && listed < 5)
             {
                 popSuspects.Add(srv.Id);
             }
@@ -231,9 +235,12 @@ await Task.WhenAll(candidates.Select(async srv =>
 // player list) is dropped only when 10+ suspects share its /24 - the signature of a farm,
 // not of one privacy-minded host.
 var suspectSet = new HashSet<string>(popSuspects, StringComparer.OrdinalIgnoreCase);
+// Two confirmed answered-with-nobody liars on one /24 convicts the cluster - this spam
+// operates in pods (a "TITAN/TEMPEST" pod of 8 listings ducked the old 10+ threshold and
+// shipped in the feed as verified rows with fabricated populations).
 var suspectsBySubnet = verified.Where(s => suspectSet.Contains(s.Id))
     .GroupBy(SubnetOf)
-    .Where(g => g.Count() >= 10)
+    .Where(g => g.Count() >= 2)
     .SelectMany(g => g.Select(s => s.Id))
     .ToHashSet(StringComparer.OrdinalIgnoreCase);
 var verifiedKept = verified.Where(s => !suspectsBySubnet.Contains(s.Id)).ToList();
