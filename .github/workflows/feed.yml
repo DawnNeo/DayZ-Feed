@@ -1,3 +1,4 @@
+# Place this file at .github/workflows/feed.yml in the feed repository.
 name: Publish DayZ server feed
 on:
   schedule:
@@ -21,12 +22,17 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
+      # Population history lives on the force-pushed single-commit "data" branch; check the
+      # prior state out so this run can append to it. First run: branch doesn't exist yet.
+      - name: Fetch history state
+        run: |
+          git fetch origin data 2>/dev/null && git worktree add history origin/data || mkdir -p history
       - name: Generate feed
         env:
           STEAM_WEB_API_KEY: ${{ secrets.STEAM_WEB_API_KEY }}
         run: |
           dotnet run --project dayz-feed-repo/feedgen -c Release
-      - name: Publish
+      - name: Publish feed
         run: |
           git config user.name "feed-bot"
           git config user.email "feed-bot@users.noreply.github.com"
@@ -36,3 +42,20 @@ jobs:
           git add docs/.nojekyll docs/servers.json
           git commit -m "feed update" || echo "no changes"
           git push
+      # The data branch is REPLACED each run (one commit, no accumulation) so the repository
+      # never bloats no matter how long the recorder runs.
+      - name: Publish history
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd history-out
+          git init -q -b data
+          git config user.name "feed-bot"
+          git config user.email "feed-bot@users.noreply.github.com"
+          git add -A
+          git commit -qm "population history"
+          git push -q --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data
+
+
+
+
