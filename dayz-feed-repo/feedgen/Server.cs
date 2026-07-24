@@ -1,8 +1,9 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Text.Json.Serialization;
 using DayZLauncher.Helpers;
+
 
 namespace DayZLauncher.Models
 {
@@ -21,9 +22,12 @@ namespace DayZLauncher.Models
         private string? _passwordEncrypted;
         private List<string> _requiredMods = new();
 
+
         public string Id { get; set; } = string.Empty;       // ip:port or a unique key
 
+
         private string _battleMetricsId = string.Empty;
+
 
         /// <summary>
         /// BattleMetrics' own numeric server id. Required by the player-count-history endpoint;
@@ -42,6 +46,7 @@ namespace DayZLauncher.Models
             }
         }
 
+
         /// <summary>
         /// Whether BattleMetrics flags this as a Bohemia official server (details.official).
         /// Authoritative - the launcher previously guessed from the server name, which never
@@ -49,17 +54,89 @@ namespace DayZLauncher.Models
         /// </summary>
         public bool IsOfficial { get; set; }
 
-        /// <summary>Two-letter country code reported by BattleMetrics.</summary>
-        public string Country { get; set; } = string.Empty;
+
+        private string _country = string.Empty;
+
+
+        /// <summary>Two-letter country code, resolved from the server's IP by the feed
+        /// backend (public-domain dataset - no lookups from user machines).</summary>
+        public string Country
+        {
+            get => _country;
+            set
+            {
+                if (SetProperty(ref _country, value))
+                {
+                    OnPropertyChanged(nameof(RegionDisplay));
+                }
+            }
+        }
+
+
+        /// <summary>Continent name for display/filtering, or "Unknown" when the IP has not
+        /// been resolved by any source.</summary>
+        [JsonIgnore]
+        public string RegionDisplay
+        {
+            get
+            {
+                string continent = Helpers.Continents.OfCountry(_country);
+                return continent.Length == 0 ? "Unknown" : $"{continent} ({_country.ToUpperInvariant()})";
+            }
+        }
+
 
         /// <summary>BattleMetrics popularity rank; lower is more popular.</summary>
         public int Rank { get; set; }
 
+
         /// <summary>Whether the server requires a password (from BattleMetrics details).</summary>
         public bool RequiresPassword { get; set; }
 
-        /// <summary>True when the server is first-person only (details.third_person == false).</summary>
-        public bool IsFirstPersonOnly { get; set; }
+
+        private bool _isFirstPersonOnly;
+        private bool _perspectiveKnown;
+
+
+        /// <summary>True when the server runs first-person only (it advertises the "no3rd"
+        /// tag). Only meaningful once <see cref="PerspectiveKnown"/> is set.</summary>
+        public bool IsFirstPersonOnly
+        {
+            get => _isFirstPersonOnly;
+            set
+            {
+                if (SetProperty(ref _isFirstPersonOnly, value))
+                {
+                    OnPropertyChanged(nameof(PerspectiveDisplay));
+                }
+            }
+        }
+
+
+        /// <summary>
+        /// True once ANY real source has stated this server's perspective: the feed's "fpp"
+        /// field, the Steam master list's gametags, or the server's own query answer. Without
+        /// it the absence of "no3rd" means "unknown", not "third person allowed" - the 1PP/3PP
+        /// filters only trust rows whose perspective was actually reported.
+        /// </summary>
+        public bool PerspectiveKnown
+        {
+            get => _perspectiveKnown;
+            set
+            {
+                if (SetProperty(ref _perspectiveKnown, value))
+                {
+                    OnPropertyChanged(nameof(PerspectiveDisplay));
+                }
+            }
+        }
+
+
+        /// <summary>Camera perspective for the detail drawer.</summary>
+        [JsonIgnore]
+        public string PerspectiveDisplay =>
+            !_perspectiveKnown ? "Unknown" : _isFirstPersonOnly ? "1PP only" : "1PP & 3PP";
+
 
         public string Name
         {
@@ -67,10 +144,13 @@ namespace DayZLauncher.Models
             set => SetProperty(ref _name, value);
         }
 
+
         public string Ip { get; set; } = string.Empty;
+
 
         /// <summary>The game port players connect on (the -port= launch argument).</summary>
         public int Port { get; set; } = 2302;
+
 
         /// <summary>
         /// The Steam A2S query port, which is NOT the same as the game port. Queries used to be
@@ -80,8 +160,10 @@ namespace DayZLauncher.Models
         /// </summary>
         public int QueryPort { get; set; }
 
+
         [JsonIgnore]
         public int EffectiveQueryPort => QueryPort > 0 ? QueryPort : Port + 1;
+
 
         /// <summary>
         /// Raw map identifier exactly as the server reports it (e.g. "chernarusplus", "enoch").
@@ -99,9 +181,11 @@ namespace DayZLauncher.Models
             }
         }
 
+
         /// <summary>Friendly map name ("chernarusplus" -> "Chernarus"), or "Unknown" if unreported.</summary>
         [JsonIgnore]
         public string MapDisplay => MapNames.ToDisplayName(_map);
+
 
         public List<string> RequiredMods
         {
@@ -117,7 +201,9 @@ namespace DayZLauncher.Models
             }
         }
 
+
         private bool _modsVerified;
+
 
         /// <summary>
         /// True once a direct A2S rules query has returned this server's actual mod list -
@@ -137,6 +223,7 @@ namespace DayZLauncher.Models
             }
         }
 
+
         /// <summary>
         /// Whether the mod list can be trusted at all. Steam's master list carries no mod data,
         /// so a Steam-sourced row would otherwise render a confident-looking "0 Mods" chip that
@@ -146,12 +233,14 @@ namespace DayZLauncher.Models
         [JsonIgnore]
         public bool ModsKnown => _requiredMods.Count > 0 || _modsVerified || !string.IsNullOrEmpty(BattleMetricsId);
 
+
         /// <summary>
         /// Mod display names from BattleMetrics, positionally aligned with <see cref="RequiredMods"/>.
         /// Supplied free by the API, so the required-mod list can show real titles without a
         /// Steam lookup per mod.
         /// </summary>
         public List<string> ModNames { get; set; } = new();
+
 
         /// <summary>
         /// The required mods as display rows: id, resolved name, and cached preview image.
@@ -160,11 +249,14 @@ namespace DayZLauncher.Models
         [JsonIgnore]
         public ObservableCollection<ServerModEntry> ModEntries { get; } = new();
 
+
         [JsonIgnore]
         public int ModCount => _requiredMods.Count;
 
+
         [JsonIgnore]
         public bool IsModded => _requiredMods.Count > 0;
+
 
         public bool Favorite
         {
@@ -172,7 +264,9 @@ namespace DayZLauncher.Models
             set => SetProperty(ref _favorite, value);
         }
 
+
         public DateTime? LastPlayedAt { get; set; }
+
 
         /// <summary>
         /// When a Steam master-list enumeration last contained this server. Drives cache
@@ -180,6 +274,7 @@ namespace DayZLauncher.Models
         /// single enumeration misses a few hundred live servers whose pings dropped.
         /// </summary>
         public DateTime? LastSeenAt { get; set; }
+
 
         public string? PasswordEncrypted
         {
@@ -192,6 +287,7 @@ namespace DayZLauncher.Models
                 }
             }
         }
+
 
         // Live fields retrieved via A2S query or BattleMetrics
         public int CurrentPlayers
@@ -206,6 +302,7 @@ namespace DayZLauncher.Models
             }
         }
 
+
         public int MaxPlayers
         {
             get => _maxPlayers;
@@ -217,6 +314,37 @@ namespace DayZLauncher.Models
                 }
             }
         }
+
+
+        private int _queueSize;
+
+
+        /// <summary>
+        /// Players waiting to log in (DayZ publishes this as "lqsN" in its query keywords).
+        /// Shown as a "+N" badge next to the player count on full servers.
+        /// </summary>
+        [JsonIgnore]
+        public int QueueSize
+        {
+            get => _queueSize;
+            set
+            {
+                if (SetProperty(ref _queueSize, value))
+                {
+                    OnPropertyChanged(nameof(QueueDisplay));
+                    OnPropertyChanged(nameof(HasQueue));
+                }
+            }
+        }
+
+
+        [JsonIgnore]
+        public string QueueDisplay => _queueSize > 0 ? $"+{_queueSize}" : string.Empty;
+
+
+        [JsonIgnore]
+        public bool HasQueue => _queueSize > 0 && IsOnline;
+
 
         /// <summary>Round-trip time in ms, or -1 when the server has not been pinged yet.</summary>
         public int Ping
@@ -231,6 +359,7 @@ namespace DayZLauncher.Models
             }
         }
 
+
         public bool IsOnline
         {
             get => _isOnline;
@@ -244,6 +373,7 @@ namespace DayZLauncher.Models
             }
         }
 
+
         /// <summary>Whether this card is showing its inline detail drawer in the server list.</summary>
         [JsonIgnore]
         public bool IsExpanded
@@ -251,6 +381,7 @@ namespace DayZLauncher.Models
             get => _isExpanded;
             set => SetProperty(ref _isExpanded, value);
         }
+
 
         /// <summary>
         /// True for rows whose live numbers came from Steam's master-list heartbeat rather than
@@ -261,6 +392,7 @@ namespace DayZLauncher.Models
         [JsonIgnore]
         public bool SteamSourced { get; set; }
 
+
         /// <summary>
         /// When a direct query last verified (or failed to verify) this row. Page visits
         /// re-verify anything staler than a minute, so flipping between pages always shows
@@ -268,6 +400,7 @@ namespace DayZLauncher.Models
         /// </summary>
         [JsonIgnore]
         public DateTime? LastVerifiedAt { get; set; }
+
 
         /// <summary>
         /// True once this server has ever backed a claimed population with an actual player
@@ -277,6 +410,24 @@ namespace DayZLauncher.Models
         [JsonIgnore]
         public bool PopVerified { get; set; }
 
+
+        /// <summary>
+        /// Set when THIS machine's own query confirmed the server unreachable; cleared only
+        /// when a local query succeeds. Deliberately untouched by feed/stream merges - "the
+        /// feed says it's online" must never resurrect a row the user's machine proved dead
+        /// (that exact resurrection was how fakes reappeared after every Refresh).
+        /// </summary>
+        [JsonIgnore]
+        public bool LocallyDead { get; set; }
+
+
+        /// <summary>Set when this row twice ANSWERED the player-list query with nobody while
+        /// claiming a crowd - the adaptive-spam signature (real populated servers answer with
+        /// entries; privacy-minded hosts don't answer at all).</summary>
+        [JsonIgnore]
+        public bool PopLied { get; set; }
+
+
         /// <summary>True while a live A2S query for this server is in flight.</summary>
         [JsonIgnore]
         public bool IsQuerying
@@ -284,6 +435,7 @@ namespace DayZLauncher.Models
             get => _isQuerying;
             set => SetProperty(ref _isQuerying, value);
         }
+
 
         /// <summary>
         /// Whether <see cref="IsOnline"/> was established by a direct A2S query rather than by
@@ -297,6 +449,7 @@ namespace DayZLauncher.Models
         [JsonIgnore]
         public bool OnlineFromQuery { get; set; }
 
+
         public string GameVersion
         {
             get => _gameVersion;
@@ -309,6 +462,7 @@ namespace DayZLauncher.Models
             }
         }
 
+
         /// <summary>
         /// Version for display. TargetNullValue in the XAML doesn't cover this, because an
         /// unqueried server has an *empty* GameVersion rather than a null one, which rendered as
@@ -317,17 +471,25 @@ namespace DayZLauncher.Models
         [JsonIgnore]
         public string GameVersionDisplay => string.IsNullOrWhiteSpace(GameVersion) ? "Unknown" : GameVersion;
 
+
         [JsonIgnore]
         public bool HasPassword => !string.IsNullOrEmpty(PasswordEncrypted);
+
 
         // Computed properties
         [JsonIgnore]
         public string PlayerDisplay => IsOnline ? $"{CurrentPlayers}/{MaxPlayers}" : "Offline";
 
+
         [JsonIgnore]
         public string PingDisplay => Ping >= 0 ? $"{Ping} ms" : "---";
+
 
         [JsonIgnore]
         public string Address => $"{Ip}:{Port}";
     }
 }
+
+
+
+
