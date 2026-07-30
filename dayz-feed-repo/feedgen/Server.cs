@@ -428,6 +428,18 @@ namespace DayZLauncher.Models
         public bool PopLied { get; set; }
 
 
+        /// <summary>
+        /// Set when a query to this row's advertised port was answered by a DIFFERENT instance
+        /// on the same box (the reply's own game port doesn't match this listing). A real server
+        /// answers its query port with its own game port, so such a row is not the server it
+        /// claims to be - the 2026 flood registers listings that point at real servers' query
+        /// ports so any verification attempt collects a real-looking answer. The row's own
+        /// claimed numbers are therefore worthless and never rank.
+        /// </summary>
+        [JsonIgnore]
+        public bool PortImpostor { get; set; }
+
+
         /// <summary>True while a live A2S query for this server is in flight.</summary>
         [JsonIgnore]
         public bool IsQuerying
@@ -489,6 +501,8 @@ namespace DayZLauncher.Models
         public string Address => $"{Ip}:{Port}";
     }
 }
+
+
 
 
 
