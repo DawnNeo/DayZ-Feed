@@ -252,6 +252,9 @@ var popSuspects = new ConcurrentBag<string>();
 // flood wave hid ~1,700 fabricated-population rows behind exactly that: they answer the
 // info query instantly but their player-list lie only surfaces on a calm retry.
 var silentClaimers = new ConcurrentBag<Server>();
+// Listings whose advertised query port is answered by a different instance - see the guard
+// inside the verification pass.
+var impostors = new ConcurrentBag<Server>();
 using var throttle = new SemaphoreSlim(192);
 
 
@@ -265,6 +268,25 @@ await Task.WhenAll(candidates.Select(async srv =>
         {
             // Unreachable from the datacenter; ship it unverified with its master-list data.
             srv.ModsVerified = false;
+            unverified.Add(srv);
+            return;
+        }
+
+
+        // Port-impostor guard. A genuine server answers its own query port with its own game
+        // port (EDF 0x80). The flood registers listings whose query ports point at OTHER
+        // servers on the same box, so a naive verifier collects a real answer and stamps this
+        // listing "verified" with someone else's name, map and population - which is how
+        // fabricated rows were reaching users as backend-measured truth. An answer that
+        // identifies a different game port proves nothing about THIS listing, so it is
+        // discarded and the row is recorded as an impostor.
+        // Adjacent ports are excused: game and query ports differ by one either way by
+        // convention, and rows whose game port the master list omitted carry an inferred value.
+        if (live.Port != live.QueryPort && srv.Port > 0 && Math.Abs(live.Port - srv.Port) > 1)
+        {
+            impostors.Add(srv);
+            srv.ModsVerified = false;
+            srv.CurrentPlayers = 0;
             unverified.Add(srv);
             return;
         }
@@ -352,6 +374,21 @@ await Task.WhenAll(candidates.Select(async srv =>
 }
 
 
+// R1b: port-stealing farms. One impostor can be a stale registration (a server that moved
+// ports), so a lone one only loses its numbers. Two or more on the same ADDRESS is a farm
+// registering listings that point at other people's servers - every impostor there is dropped.
+var impostorList = impostors.ToList();
+var stealingIps = impostorList.GroupBy(s => s.Ip, StringComparer.Ordinal)
+    .Where(g => g.Count() >= 2)
+    .Select(g => g.Key)
+    .ToHashSet(StringComparer.Ordinal);
+var impostorDrop = impostorList.Where(s => stealingIps.Contains(s.Ip))
+    .Select(s => s.Id)
+    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+Console.WriteLine($"port impostors: {impostorList.Count} on {impostorList.Select(s => s.Ip).Distinct().Count()} address(es); " +
+                  $"dropping {impostorDrop.Count} from {stealingIps.Count} port-stealing address(es)");
+
+
 // R2: impossible capacity. DayZ's engine hard-caps a server at 127 survivors, so a row
 // CLAIMING players in a "130/200/255-slot" server is lying by physics - the July flood
 // stamps 130-220 on its listings while every real franchise tops out at exactly 127.
@@ -412,8 +449,34 @@ bool IsFarmRow(Server s)
 }
 
 
-var keptUnverified = unverifiedAfterCluster.Where(s => !IsFarmRow(s)).ToList();
+var keptUnverified = unverifiedAfterCluster.Where(s => !IsFarmRow(s) && !impostorDrop.Contains(s.Id)).ToList();
 Console.WriteLine($"unverified after farm-subnet rule: {keptUnverified.Count} (dropped {unverifiedAfterCluster.Count - keptUnverified.Count})");
+
+
+// R4: uniform-claim clusters. The flood stamps ONE template across hundreds of ports on a
+// single address - same map, same capacity, a "population" in a narrow band (observed live:
+// 45.82.14.21 carrying ~100 listings, all sakhal, all 127-slot, all claiming 70-80 players).
+// Real customers sharing a box run different maps, caps and populations. Members that the
+// runner never verified lose their claimed numbers; verified rows are untouched, so a genuine
+// rack that happens to be uniform keeps its measured counts.
+{
+    int refused = 0;
+    foreach (var ipGroup in keptUnverified.Concat(verifiedKept).GroupBy(s => s.Ip, StringComparer.Ordinal)
+                 .Where(g => g.Count() >= 25))
+    {
+        foreach (var config in ipGroup.GroupBy(s => (s.Map, s.MaxPlayers)))
+        {
+            var claimers = config.Where(s => !s.PopVerified && s.CurrentPlayers > 0).ToList();
+            if (claimers.Count < 8) continue;
+            foreach (var s in claimers)
+            {
+                s.CurrentPlayers = 0;
+                refused++;
+            }
+        }
+    }
+    Console.WriteLine($"uniform-claim rule: refused {refused} template-cluster population claims");
+}
 
 
 // ---- 5. Publish. The "mods" field is present ONLY when the rules query answered, so the
@@ -562,6 +625,8 @@ catch (Exception ex)
 
 
 return verifiedKept.Count > 500 ? 0 : 2; // refuse to publish an implausibly small list
+
+
 
 
 
