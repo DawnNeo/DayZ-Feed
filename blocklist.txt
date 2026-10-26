@@ -1,0 +1,9 @@
+# Listings the feed must never publish, whatever the automatic rules think of them.
+#   1.2.3.4:2302   that one listing
+#   1.2.3.4        every port on that address
+#   1.2.3.         the whole /24
+# Anything after "#" is a comment.
+
+# Port-hopping fake: registers a new random high port every few days and answers with a
+# fabricated 127/127 on every sample (40+ distinct listings in 30 days of history).
+91.196.33.74

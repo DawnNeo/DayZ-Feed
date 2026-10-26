@@ -128,6 +128,39 @@ foreach (var map in byId.Values
 Console.WriteLine($"enumerated (deduped): {byId.Count}");
 
 
+// ---- 1a. Operator blocklist (blocklist.txt at the repo root). The automatic rules below are
+//          deliberately conservative - shared RU hosting runs many genuinely full servers on
+//          random high ports, so a rule strict enough to catch every fake also hides real
+//          servers. This is the deterministic override for the ones that slip through.
+//          One entry per line: "1.2.3.4:2302" = that listing, "1.2.3.4" = every port on that
+//          address (port-hopping fakes re-register on a new port every few days), "1.2.3." =
+//          the whole /24. "#" starts a comment.
+{
+    var exactIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    var addresses = new HashSet<string>(StringComparer.Ordinal);
+    var prefixes = new List<string>();
+    if (File.Exists("blocklist.txt"))
+    {
+        foreach (var raw in File.ReadAllLines("blocklist.txt"))
+        {
+            string entry = raw.Split('#')[0].Trim();
+            if (entry.Length == 0) continue;
+            if (entry.EndsWith('.')) prefixes.Add(entry);
+            else if (entry.Contains(':')) exactIds.Add(entry);
+            else addresses.Add(entry);
+        }
+    }
+
+    var blocked = byId.Values
+        .Where(s => exactIds.Contains(s.Id) || addresses.Contains(s.Ip) ||
+                    prefixes.Any(p => s.Ip.StartsWith(p, StringComparison.Ordinal)))
+        .Select(s => s.Id)
+        .ToList();
+    foreach (var id in blocked) byId.Remove(id);
+    Console.WriteLine($"operator blocklist: {exactIds.Count + addresses.Count + prefixes.Count} entries, dropped {blocked.Count} listing(s)");
+}
+
+
 // ---- 1b. Country per server, resolved from its IP against the geo-whois-asn-country
 //          dataset (CC0/PDDL - public domain, no keys, no attribution requirement, freely
 //          redistributable). Downloaded fresh each run; a failed download just means this
@@ -476,6 +509,60 @@ Console.WriteLine($"unverified after farm-subnet rule: {keptUnverified.Count} (d
         }
     }
     Console.WriteLine($"uniform-claim rule: refused {refused} template-cluster population claims");
+}
+
+
+// R5: one-address listing farms. No real machine runs 50+ DayZ servers behind one IP (each
+// instance needs its own cores and several GB of RAM), yet the live feed carried 73 addresses
+// with 50-290 listings each - nearly half the published list. Three signatures, measured
+// against the October 2026 feed, convict the whole address; every real server spot-checked
+// (Rearmed, MIDNIGHT, PODPIVAS, DayZERO, DayZed.GG) lives elsewhere and is untouched.
+//   A. 25+ listings, at least half advertising more than the engine's 127 slots - word-salad
+//      names ("Polar Polar Divide Divide Survivor's Refuge") on cloud VPS addresses.
+//   B. 50+ listings, at least half carrying a name 3+ OTHER addresses also carry - clones of
+//      popular servers. Proven live: 8 "GROZA 7" copies queried at the same moment reported
+//      8 different populations (103-127), which one real server cannot do.
+//   C. 50+ listings where every measured populated listing is exactly full (the "80/80" farm).
+// The density gate is what protects originals: the real server a clone copies sits on an
+// address with a handful of listings, so only the copies are dropped.
+{
+    static string NameKey(string n) => System.Text.RegularExpressions.Regex.Replace(n.ToLowerInvariant(), @"\s+", " ").Trim();
+
+    var pool5 = verifiedKept.Concat(keptUnverified).ToList();
+    var addressesPerName = pool5.GroupBy(s => NameKey(s.Name))
+        .ToDictionary(g => g.Key, g => g.Select(s => s.Ip).Distinct(StringComparer.Ordinal).Count());
+
+    var farmIps = new HashSet<string>(StringComparer.Ordinal);
+    int byCapacity = 0, byClones = 0, byFullHouse = 0;
+    foreach (var g in pool5.GroupBy(s => s.Ip, StringComparer.Ordinal))
+    {
+        int n = g.Count();
+        if (n >= 25 && g.Count(s => s.MaxPlayers > 127) * 2 >= n)
+        {
+            farmIps.Add(g.Key); byCapacity++;
+            continue;
+        }
+        if (n < 50) continue;
+
+        int cloned = g.Count(s => { var k = NameKey(s.Name); return k.Length >= 8 && addressesPerName[k] - 1 >= 3; });
+        if (cloned * 2 >= n)
+        {
+            farmIps.Add(g.Key); byClones++;
+            continue;
+        }
+
+        var populated = g.Where(s => s.PopVerified && s.CurrentPlayers > 0).ToList();
+        if (populated.Count >= 10 && populated.All(s => s.CurrentPlayers == s.MaxPlayers))
+        {
+            farmIps.Add(g.Key); byFullHouse++;
+        }
+    }
+
+    int before = pool5.Count;
+    verifiedKept = verifiedKept.Where(s => !farmIps.Contains(s.Ip)).ToList();
+    keptUnverified = keptUnverified.Where(s => !farmIps.Contains(s.Ip)).ToList();
+    Console.WriteLine($"listing farms: {farmIps.Count} address(es) (capacity {byCapacity}, clones {byClones}, full-house {byFullHouse}), " +
+                      $"dropped {before - verifiedKept.Count - keptUnverified.Count} listing(s)");
 }
 
 
