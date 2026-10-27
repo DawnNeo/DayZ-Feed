@@ -47,7 +47,7 @@ history. Launchers older than 1.0.2 only read `servers`, so they never see suspe
 | `reason` | Meaning |
 |---|---|
 | `blocklist` | Matched an entry in `blocklist.txt`. |
-| `farm-capacity` | The address has 25+ listings and at least half advertise more than DayZ's 127-slot limit. |
+| `farm-capacity` | The address has 25+ listings and at least half advertise 128+ slots. (Real servers can have more than 127 slots, e.g. Rearmed's 130 and 150, but never dozens on one address; the farms use 160–255.) |
 | `farm-clones` | The address has 50+ listings and at least half reuse a name that 3+ other addresses also use. |
 | `farm-full-house` | The address has 50+ listings and every one with players claims to be exactly full. |
 | `farm-dense` | The address has 50+ listings and 10+ of them have players. No proven-real address has more than 8 listings. |
@@ -56,7 +56,7 @@ history. Launchers older than 1.0.2 only read `servers`, so they never see suspe
 | `clone-no-list` | Its name is on 3+ addresses, it claims 20+ players but can't produce a player list, and an older listing with the same name exists (that original is never flagged by this rule). |
 | `name-flood` | One of 40+ listings sharing a generated name pattern across 10+ subnets. |
 | `ip-uniform-names` | Its address has 25+ listings, 15+ of them with the same name pattern. |
-| `pop-lie` | Claims 20+ players but answered with an empty player list, and so did a neighbour on its /24. |
+| `pop-lie` | Claims 20+ players but answered with an empty player list, or claims more players than its own slots, and so did a neighbour on its /24. |
 | `port-impostor` | Its query port is answered by a different server, and the address has other impostors. |
 | `dead-farm-subnet` | An unreachable, empty listing on a /24 with 25+ listings where under 3% have players. |
 
@@ -102,7 +102,8 @@ Each row:
 | `id` | `ip:gamePort`, the key everything uses. |
 | `name`, `ip`, `port`, `queryPort`, `map`, `version` | From the server's own answer when verified, otherwise from the master list. |
 | `players`, `maxPlayers` | `players` is the measured count for verified rows and `0` otherwise, including all suspects. |
-| `verified` | The server answered the runner directly. |
+| `verified` | The server answered the runner directly. Only ~20% do: many hosts drop datacenter traffic, real servers and fakes alike. |
+| `claimed` | Unverified rows only: the player count the master list reports. Not a population; launchers use it to decide which unreachable servers to check from the player's own connection (optional). |
 | `official`, `passworded` | |
 | `mods` | Workshop ids. **Present only when the mods query answered**, so `[]` means verified vanilla and a missing field means unknown. |
 | `cc` | Country code (optional). |
@@ -118,3 +119,10 @@ Sharded into `s00.json` … `s39.json`; a server's shard is the sum of the UTF-8
 `d` (up to 30 daily rows: `[date, sum, count, peak]`) and `fs` (the unix minute it was first
 recorded, written once and never trimmed). Servers that stop being seen age out after 30 days.
 The branch is replaced with a single commit every run, so it never grows.
+
+## Setup
+
+- **Secret:** `STEAM_WEB_API_KEY` under Settings → Secrets and variables → Actions. It stays
+  on GitHub and is never published.
+- **Pages:** Settings → Pages → Source: **GitHub Actions**. The workflow deploys the feed
+  directly. It is not committed to the repository, which keeps the repo from growing every run.

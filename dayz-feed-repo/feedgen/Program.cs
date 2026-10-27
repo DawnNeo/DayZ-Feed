@@ -70,6 +70,7 @@ async Task<int> Enumerate(string filter)
 
 
             int players = e.TryGetProperty("players", out var p) ? p.GetInt32() : 0;
+            int maxPlayers = e.TryGetProperty("max_players", out var mp) ? mp.GetInt32() : 0;
             string gametype = e.TryGetProperty("gametype", out var gt) ? gt.GetString() ?? "" : "";
             byId[id] = new Server
             {
@@ -79,8 +80,10 @@ async Task<int> Enumerate(string filter)
                 QueryPort = queryPort,
                 Name = e.TryGetProperty("name", out var n) ? n.GetString() ?? "DayZ Server" : "DayZ Server",
                 Map = e.TryGetProperty("map", out var m) ? m.GetString() ?? "" : "",
-                CurrentPlayers = players > 127 ? 0 : players,
-                MaxPlayers = e.TryGetProperty("max_players", out var mp) ? mp.GetInt32() : 0,
+                // More players than its own slots is impossible. (More than 127 SLOTS is not:
+                // real servers run 130 and 150 - Rearmed US3 measured 102/130, listing all 102.)
+                CurrentPlayers = players > maxPlayers ? 0 : players,
+                MaxPlayers = maxPlayers,
                 GameVersion = e.TryGetProperty("version", out var v) ? v.GetString() ?? "" : "",
                 IsOfficial = gametype.Length > 0 &&
                              System.Text.RegularExpressions.Regex.IsMatch(gametype, @"shard\d{3}(,|$)") &&
@@ -407,7 +410,7 @@ await Task.WhenAll(candidates.Select(async srv =>
 
 
         srv.PopVerified = true; // answered the runner directly - the meaning of "verified"
-        srv.CurrentPlayers = live.CurrentPlayers > 127 ? 0 : live.CurrentPlayers;
+        srv.CurrentPlayers = live.CurrentPlayers > live.MaxPlayers ? 0 : live.CurrentPlayers;
         srv.MaxPlayers = live.MaxPlayers;
         if (!string.IsNullOrWhiteSpace(live.Map)) srv.Map = live.Map;
         if (!string.IsNullOrWhiteSpace(live.Name)) srv.Name = live.Name;
@@ -557,7 +560,7 @@ await Task.WhenAll(candidates.Select(async srv =>
                 return;
             }
             srv.PopVerified = true;
-            srv.CurrentPlayers = live.CurrentPlayers > 127 ? 0 : live.CurrentPlayers;
+            srv.CurrentPlayers = live.CurrentPlayers > live.MaxPlayers ? 0 : live.CurrentPlayers;
             srv.MaxPlayers = live.MaxPlayers;
             if (!string.IsNullOrWhiteSpace(live.Map)) srv.Map = live.Map;
             if (!string.IsNullOrWhiteSpace(live.Name)) srv.Name = live.Name;
@@ -601,15 +604,14 @@ Console.WriteLine($"port impostors: {impostorList.Count} on {impostorList.Select
                   $"dropping {impostorDrop.Count} from {stealingIps.Count} port-stealing address(es)");
 
 
-// R2: impossible capacity. DayZ's engine hard-caps a server at 127 survivors, so a row
-// CLAIMING players in a "130/200/255-slot" server is lying by physics - the July flood
-// stamps 130-220 on its listings while every real franchise tops out at exactly 127.
-// Empty rows with a big max are left alone (a misconfigured cfg is not a lie until the
-// row claims a crowd it cannot hold).
+// R2: impossible claims - more players than the listing's own slots. (This used to treat
+// any crowd in a 128+ slot server as a lie, on the belief that DayZ caps servers at 127. It
+// doesn't: real servers run 130 and 150 slots - Rearmed US3 measured 102/130 listing all 102,
+// Rearmed US2 8/150 - and the old rule flagged both as population liars.)
 int impossible = 0;
 foreach (var s in verified.Concat(unverified))
 {
-    if (s.CurrentPlayers > 0 && s.MaxPlayers > 127)
+    if (s.CurrentPlayers > 0 && s.CurrentPlayers > s.MaxPlayers)
     {
         popSuspects.Add(s.Id);
         impossible++;
@@ -646,18 +648,18 @@ Console.WriteLine($"verified: {verified.Count} (pop-lie convicted: {verified.Cou
 //         the datacenter but reporting a real crowd) is always kept, as is any verified row.
 var pool = verifiedKept.Concat(unverifiedAfterCluster).ToList();
 var subnetCounts = pool.GroupBy(SubnetOf).ToDictionary(g => g.Key, g => g.Count());
-// The populated fraction counts only CREDIBLE population: a claim with an impossible
-// capacity is not population. The flood defeated the v3 version of this rule by simply
-// claiming players in its heartbeats - free lies must not keep a farm subnet "alive".
+// The populated fraction counts only CREDIBLE population: a claim of more players than the
+// listing's own slots is not population. The flood defeated the v3 version of this rule by
+// simply claiming players in its heartbeats - free lies must not keep a farm subnet "alive".
 var subnetPopFrac = pool.GroupBy(SubnetOf)
-    .ToDictionary(g => g.Key, g => g.Count(s => s.CurrentPlayers > 0 && s.MaxPlayers <= 127) / (double)g.Count());
+    .ToDictionary(g => g.Key, g => g.Count(s => s.CurrentPlayers > 0 && s.CurrentPlayers <= s.MaxPlayers) / (double)g.Count());
 
 
 bool IsFarmRow(Server s)
 {
     string sn = SubnetOf(s);
-    // A row with an impossible capacity gets no claims-players exemption either.
-    return (s.CurrentPlayers == 0 || s.MaxPlayers > 127) &&
+    // An impossible claim (more players than slots) gets no claims-players exemption either.
+    return (s.CurrentPlayers == 0 || s.CurrentPlayers > s.MaxPlayers) &&
            subnetCounts[sn] >= 25 && subnetPopFrac[sn] < 0.03;
 }
 
@@ -894,7 +896,8 @@ static DateTime? EarliestSample(JsonElement entry)
 // 50-290 listings each - nearly half the published list. Three signatures convict the whole
 // address; every real server spot-checked (Rearmed, MIDNIGHT, PODPIVAS, DayZERO, DayZed.GG)
 // lives elsewhere and is untouched.
-//   A. 25+ listings, at least half advertising more than the engine's 127 slots - word-salad
+//   A. 25+ listings, at least half advertising 128+ slots (the farms use 160-255; real big
+//      servers exist - Rearmed runs 130 and 150 - but one to three per address) - word-salad
 //      names ("Polar Polar Divide Divide Survivor's Refuge") on cloud VPS addresses.
 //   B. 50+ listings, at least half carrying a name 3+ OTHER addresses also carry - clones of
 //      popular servers. Proven live: 8 "GROZA 7" copies queried at the same moment reported
@@ -962,10 +965,14 @@ object Row(Server s, string? reason) => new
     map = s.Map,
     // Unverified rows only have SELF-REPORTED counts (the adaptive spam's favorite lie),
     // so the feed publishes 0 for them - clients rank on verified reality only, and each
-    // user's local sweep supplies the real number the moment the row is looked at. A
-    // count in an impossible-capacity server (max > the 127 engine cap) is zeroed too, and
-    // so is every suspect's: if one is revealed, the launcher's own query gives the truth.
-    players = reason == null && s.PopVerified && s.MaxPlayers <= 127 ? s.CurrentPlayers : 0,
+    // user's local sweep supplies the real number the moment the row is looked at. Every
+    // suspect's count is zeroed too: if one is revealed, the launcher's own query gives the truth.
+    players = reason == null && s.PopVerified ? s.CurrentPlayers : 0,
+    // Unverified only: what the master list says it has. NOT a population - the runner reaches
+    // only ~20% of servers (many hosts drop datacenter traffic, real ones and fakes alike), so
+    // this tells launchers which unreachable listings claim a crowd and need checking from the
+    // player's own connection before any count is shown.
+    claimed = reason == null && !s.PopVerified && s.CurrentPlayers > 0 ? s.CurrentPlayers : (int?)null,
     maxPlayers = s.MaxPlayers,
     official = s.IsOfficial,
     passworded = s.RequiresPassword,
