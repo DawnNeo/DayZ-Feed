@@ -1,7 +1,7 @@
-# DayZ server feed
+# feedgen
 
-A scheduled GitHub Action enumerates the DayZ master list (Steam Web API), filters the
-spam-flood registrations with evidence-based rules, verifies every surviving server with
-direct A2S queries, and publishes the clean result to docs/servers.json every 20 minutes.
+The generator the feed workflow runs (`dotnet run --project dayz-feed-repo/feedgen`). It needs
+`STEAM_WEB_API_KEY` in the environment, writes `servers.json` to the working directory, and
+reads/writes population history in `./history` → `./history-out`.
 
-No secrets live in this repository; the Steam Web API key is an Actions secret.
+See the [repository README](../README.md) for what it does and the output format.

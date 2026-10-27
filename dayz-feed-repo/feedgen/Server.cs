@@ -412,6 +412,29 @@ namespace DayZLauncher.Models
 
 
         /// <summary>
+        /// What this server's A2S_PLAYER answer contained this run: -2 = never asked, -1 = no
+        /// answer, otherwise the number of entries. Five or more is proof of real players, and
+        /// such a listing is cleared of every farm/clone verdict - the one thing the fakes have
+        /// never been able to produce (0 of 30 flagged listings sampled live in October 2026,
+        /// against 15 of 15 official servers).
+        /// </summary>
+        [JsonIgnore]
+        public int PlayerListCount { get; set; } = -2;
+
+        [JsonIgnore]
+        public bool HasRealPlayerList => PlayerListCount >= 5;
+
+        /// <summary>Player-list checks this run that came back silent or short while the server
+        /// claimed 20+ players, and when the first of them happened. Three such failures spread
+        /// over 5+ minutes flag the listing "no-player-list".</summary>
+        [JsonIgnore]
+        public int FailedListChecks { get; set; }
+
+        [JsonIgnore]
+        public DateTime? FirstFailedListCheckAt { get; set; }
+
+
+        /// <summary>
         /// Set when THIS machine's own query confirmed the server unreachable; cleared only
         /// when a local query succeeds. Deliberately untouched by feed/stream merges - "the
         /// feed says it's online" must never resurrect a row the user's machine proved dead

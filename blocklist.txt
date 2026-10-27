@@ -1,4 +1,5 @@
-# Listings the feed must never publish, whatever the automatic rules think of them.
+# Listings the feed flags as suspect, whatever the automatic rules think of them. They are
+# moved to the feed's "suspect" list (hidden by default in the launcher, never deleted).
 #   1.2.3.4:2302   that one listing
 #   1.2.3.4        every port on that address
 #   1.2.3.         the whole /24

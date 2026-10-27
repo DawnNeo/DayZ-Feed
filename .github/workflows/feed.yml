@@ -2,7 +2,7 @@
 name: Publish DayZ server feed
 on:
   schedule:
-    - cron: "*/20 * * * *"   # every 20 minutes
+    - cron: "*/20 * * * *"   # GitHub treats this as "when it can" - in practice every few hours
   workflow_dispatch: {}       # manual run button
 concurrency:
   group: feed
@@ -10,13 +10,19 @@ concurrency:
 
 
 permissions:
-  contents: write
+  contents: write   # pushes the population history to the "data" branch
+  pages: write      # publishes servers.json to GitHub Pages
+  id-token: write   # required by actions/deploy-pages
 
 
 jobs:
   feed:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
+    # deploy-pages publishes into this environment; it is what the Pages URL hangs off.
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -32,19 +38,28 @@ jobs:
           STEAM_WEB_API_KEY: ${{ secrets.STEAM_WEB_API_KEY }}
         run: |
           dotnet run --project dayz-feed-repo/feedgen -c Release
-      - name: Publish feed
+      # The feed is published straight to GitHub Pages as a deployment - NOT committed to main.
+      # Committing a ~6 MB file every run grew the repository by roughly 0.5 MB per run (272 MB
+      # in three months), and more frequent runs would have hit GitHub's size limits within
+      # weeks. The URL is unchanged: https://dawnneo.github.io/DayZ-Feed/servers.json
+      # (Requires Settings > Pages > Source: "GitHub Actions".)
+      - name: Stage site
         run: |
-          git config user.name "feed-bot"
-          git config user.email "feed-bot@users.noreply.github.com"
-          mkdir -p docs
-          touch docs/.nojekyll
-          mv servers.json docs/servers.json
-          git add docs/.nojekyll docs/servers.json
-          git commit -m "feed update" || echo "no changes"
-          git push
+          mkdir -p site
+          mv servers.json site/servers.json
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+      # The feed goes out FIRST, so a problem with the history push can never hold back the
+      # server list everyone downloads.
+      - name: Publish feed
+        id: deployment
+        uses: actions/deploy-pages@v5
       # The data branch is REPLACED each run (one commit, no accumulation) so the repository
-      # never bloats no matter how long the recorder runs.
+      # never bloats no matter how long the recorder runs. A failure here is reported but does
+      # not fail the run - the feed is already published.
       - name: Publish history
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -55,7 +70,3 @@ jobs:
           git add -A
           git commit -qm "population history"
           git push -q --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data
-
-
-
-

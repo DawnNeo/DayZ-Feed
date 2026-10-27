@@ -141,10 +141,13 @@ namespace DayZLauncher.Services
 
         /// <summary>
         /// Reads one datagram, giving up after <paramref name="timeoutMs"/>. Split ("multi-packet")
-        /// responses are rejected rather than misparsed - A2S_INFO fits in a single packet for
-        /// DayZ, and treating a fragment as a whole response yields nonsense fields.
+        /// responses are rejected by default rather than misparsed - A2S_INFO fits in a single
+        /// packet for DayZ, and treating a fragment as a whole response yields nonsense fields.
+        /// The player and rules queries pass <paramref name="allowSplit"/> so their fragments reach
+        /// ReassembleAsync: a player list stops fitting one datagram at roughly 50 players, and
+        /// rejecting it made every big real server look like it had no player list at all.
         /// </summary>
-        private static async Task<byte[]?> ReceiveWithTimeoutAsync(UdpClient client, int timeoutMs)
+        private static async Task<byte[]?> ReceiveWithTimeoutAsync(UdpClient client, int timeoutMs, bool allowSplit = false)
         {
             var receiveTask = client.ReceiveAsync();
             var timeoutTask = Task.Delay(timeoutMs);
@@ -163,7 +166,7 @@ namespace DayZLauncher.Services
 
             if (buffer.Length < 5) return null;
             // 0xFFFFFFFF is a single-packet response; 0xFFFFFFFE marks a split one.
-            if (BitConverter.ToInt32(buffer, 0) != -1) return null;
+            if (BitConverter.ToInt32(buffer, 0) != -1 && !(allowSplit && IsSplitHeader(buffer))) return null;
 
 
             return buffer;
@@ -355,7 +358,7 @@ namespace DayZLauncher.Services
                 await udpClient.SendAsync(request, request.Length, endPoint);
 
 
-                byte[]? data = await ReceiveWithTimeoutAsync(udpClient, timeoutMs);
+                byte[]? data = await ReceiveWithTimeoutAsync(udpClient, timeoutMs, allowSplit: true);
                 if (data == null || data.Length < 9) return none;
 
 
@@ -366,7 +369,7 @@ namespace DayZLauncher.Services
                 {
                     Buffer.BlockCopy(data, 5, request, 5, 4);
                     await udpClient.SendAsync(request, request.Length, endPoint);
-                    data = await ReceiveWithTimeoutAsync(udpClient, timeoutMs);
+                    data = await ReceiveWithTimeoutAsync(udpClient, timeoutMs, allowSplit: true);
                     if (data == null || data.Length < 5) return none;
                 }
 
@@ -416,7 +419,7 @@ namespace DayZLauncher.Services
                 await udpClient.SendAsync(request, request.Length, endPoint);
 
 
-                byte[]? data = await ReceiveWithTimeoutAsync(udpClient, timeoutMs);
+                byte[]? data = await ReceiveWithTimeoutAsync(udpClient, timeoutMs, allowSplit: true);
                 if (data == null || data.Length < 5) return -1;
 
 
@@ -425,7 +428,7 @@ namespace DayZLauncher.Services
                 {
                     Buffer.BlockCopy(data, 5, request, 5, 4);
                     await udpClient.SendAsync(request, request.Length, endPoint);
-                    data = await ReceiveWithTimeoutAsync(udpClient, timeoutMs);
+                    data = await ReceiveWithTimeoutAsync(udpClient, timeoutMs, allowSplit: true);
                     if (data == null || data.Length < 5) return -1;
                 }
 
@@ -437,14 +440,18 @@ namespace DayZLauncher.Services
                 // Count the entries actually present ([index u8][name cstr][score i32][time f32])
                 // rather than trusting the count byte, which a liar controls too.
                 int pos = 6, entries = 0;
+                var durations = new System.Collections.Generic.List<float>();
                 while (pos < payload.Length)
                 {
                     pos++; // player index
                     while (pos < payload.Length && payload[pos] != 0) pos++;
-                    pos += 1 + 8; // terminator + score + duration
-                    if (pos <= payload.Length) entries++;
+                    pos += 1; // terminator
+                    if (pos + 8 > payload.Length) break;
+                    durations.Add(BitConverter.ToSingle(payload, pos + 4)); // after the i32 score
+                    pos += 8;
+                    entries++;
                 }
-                return entries;
+                return IsFabricatedList(durations) ? 0 : entries;
             }
             catch (Exception ex)
             {
@@ -455,15 +462,52 @@ namespace DayZLauncher.Services
 
 
         /// <summary>
-        /// Handles Source-engine split responses (header -2). A modded DayZ rules reply rarely
-        /// fits one datagram, so fragments are collected, ordered by their sequence number and
-        /// concatenated. Single-packet responses (header -1) pass straight through.
+        /// A generated player list: 5+ "players" whose online times, sorted, climb in one constant
+        /// step. Seen live on 104.128.128.168 (copies of SAYONARA and KarmaKrew): 62 entries at
+        /// 300, 317, 334... - an exact 17.0s step, unchanged between polls. Real lists never do
+        /// this: on Rearmed, MIDNIGHT, KarmaKrew, DayZed.GG and 12 official servers the steps
+        /// varied by 23-894s. A step under 1s is excluded - players who joined together really do
+        /// sit within a second of each other (official 0751: 404, 404, 405, 405, 405). Such a list
+        /// is treated as answered with nobody, the fake signature.
+        /// </summary>
+        internal static bool IsFabricatedList(System.Collections.Generic.IReadOnlyList<float> durations)
+        {
+            if (durations.Count < 5) return false;
+            var sorted = durations.OrderBy(d => d).ToList();
+            float minStep = float.MaxValue, maxStep = float.MinValue, sum = 0;
+            for (int i = 1; i < sorted.Count; i++)
+            {
+                float step = sorted[i] - sorted[i - 1];
+                minStep = Math.Min(minStep, step);
+                maxStep = Math.Max(maxStep, step);
+                sum += step;
+            }
+            float meanStep = sum / (sorted.Count - 1);
+            return maxStep - minStep < 1f && meanStep >= 1f;
+        }
+
+        /// <summary>
+        /// A split-response marker. Source games send -2 little-endian (FE FF FF FF); DayZ's
+        /// engine sends the same value big-endian (FF FF FF FE) - measured live on Rearmed and
+        /// MIDNIGHT - and accepting only the Source form meant no DayZ split reply was ever
+        /// recognised. The fragment header after it is the Source layout either way:
+        /// id (4), total (1), number (1, zero-based), max size (2).
+        /// </summary>
+        private static bool IsSplitHeader(byte[] b) =>
+            b.Length >= 4 &&
+            ((b[0] == 0xFE && b[1] == 0xFF && b[2] == 0xFF && b[3] == 0xFF) ||
+             (b[0] == 0xFF && b[1] == 0xFF && b[2] == 0xFF && b[3] == 0xFE));
+
+        /// <summary>
+        /// Handles split responses. A modded DayZ rules reply, or any player list over ~50 names,
+        /// doesn't fit one datagram, so fragments are collected, ordered by their (zero-based)
+        /// sequence number and concatenated. Single-packet responses (header -1) pass straight
+        /// through.
         /// </summary>
         private static async Task<byte[]?> ReassembleAsync(UdpClient client, byte[] first, int timeoutMs)
         {
-            int header = BitConverter.ToInt32(first, 0);
-            if (header == -1) return first;
-            if (header != -2) return null;
+            if (BitConverter.ToInt32(first, 0) == -1) return first;
+            if (!IsSplitHeader(first)) return null;
 
 
             var fragments = new System.Collections.Generic.SortedDictionary<int, byte[]>();
@@ -473,11 +517,14 @@ namespace DayZLauncher.Services
 
             while (true)
             {
-                if (packet.Length < 12 || BitConverter.ToInt32(packet, 0) != -2) return null;
+                if (packet.Length < 12 || !IsSplitHeader(packet)) return null;
 
 
+                // The bz2 flag is a Source-engine convention (top bit of the little-endian id).
+                // DayZ never compresses, and its ids are random, so the check applies only to
+                // the Source byte order - on DayZ it would reject about half of all replies.
                 int id = BitConverter.ToInt32(packet, 4);
-                if ((id & unchecked((int)0x80000000)) != 0) return null; // bz2-compressed - not used by DayZ
+                if (packet[0] == 0xFE && (id & unchecked((int)0x80000000)) != 0) return null;
 
 
                 total = packet[8];
@@ -489,7 +536,7 @@ namespace DayZLauncher.Services
                 if (fragments.Count >= total) break;
 
 
-                byte[]? next = await ReceiveWithTimeoutAsync(client, timeoutMs);
+                byte[]? next = await ReceiveWithTimeoutAsync(client, timeoutMs, allowSplit: true);
                 if (next == null) return null;
                 packet = next;
             }
