@@ -118,10 +118,3 @@ Sharded into `s00.json` … `s39.json`; a server's shard is the sum of the UTF-8
 `d` (up to 30 daily rows: `[date, sum, count, peak]`) and `fs` (the unix minute it was first
 recorded, written once and never trimmed). Servers that stop being seen age out after 30 days.
 The branch is replaced with a single commit every run, so it never grows.
-
-## Setup
-
-- **Secret:** `STEAM_WEB_API_KEY` under Settings → Secrets and variables → Actions. It stays
-  on GitHub and is never published.
-- **Pages:** Settings → Pages → Source: **GitHub Actions**. The workflow deploys the feed
-  directly. It is not committed to the repository, which keeps the repo from growing every run.
