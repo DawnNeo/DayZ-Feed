@@ -311,11 +311,14 @@ Console.WriteLine($"convicted after single-IP uniformity rule: {convicted.Count}
 var a2s = new A2SQueryService();
 
 
-// ---- 2b. Hearing. Every listing judged on master-list evidence alone (farm addresses, name
-//          floods) that CLAIMS players is asked for its player list before being flagged. A
-//          list with 5+ entries is proof of real players - the one thing the fakes have never
-//          produced - so that listing is cleared and verified like any other. Blocklist
-//          entries are the operator's explicit call and are not re-heard.
+// ---- 2b. Hearing, first half. Every listing judged on master-list evidence alone (farm
+//          addresses, name floods) that CLAIMS players is asked for its player list before the
+//          verdict stands. One list proves nothing - the replay farms answer a convincing 70-119
+//          names that never change - so this only takes the FIRST sample; the motion check
+//          (R1c) takes the second minutes later and clears the listings whose players really
+//          kept playing. Until then they stay suspects. Blocklist entries are the operator's
+//          explicit call and are not heard.
+var heardAccused = new List<Server>();
 {
     var accused = suspects.Where(x => x.Reason != "blocklist").Select(x => x.Server)
         .Concat(convicted.Keys.Select(id => byId[id]))
@@ -323,11 +326,11 @@ var a2s = new A2SQueryService();
         .ToList();
 
     // One attempt each, wide, and a hard time budget: the accused are ~45% of the master list
-    // and most never answer, so an unbounded hearing could push the run past its 50-minute
-    // limit and publish nothing. Anything not heard in time simply stays a suspect - the safe
+    // and most never answer, so an unbounded hearing could push the run past its time limit
+    // and publish nothing. Anything not heard in time simply stays a suspect - the safe
     // default, since suspects are hidden, not deleted.
     using var hearingThrottle = new SemaphoreSlim(192);
-    var cleared = new ConcurrentBag<Server>();
+    var answered = new ConcurrentBag<Server>();
     int closed = 0;
     var hearing = Task.WhenAll(accused.Select(async srv =>
     {
@@ -335,10 +338,10 @@ var a2s = new A2SQueryService();
         try
         {
             if (Volatile.Read(ref closed) != 0) return;
-            int listed = await a2s.QueryPlayerListCountAsync(srv.Ip, srv.EffectiveQueryPort, timeoutMs: 2000, attempts: 1);
+            var (listed, durations) = await a2s.QueryPlayerListAsync(srv.Ip, srv.EffectiveQueryPort, timeoutMs: 2000, attempts: 1);
             if (Volatile.Read(ref closed) != 0) return;
-            srv.PlayerListCount = Math.Max(srv.PlayerListCount, listed);
-            if (srv.HasRealPlayerList) cleared.Add(srv);
+            srv.RecordListSample(listed, durations, DateTime.UtcNow);
+            if (srv.HasListEntries) answered.Add(srv);
         }
         catch { }
         finally { hearingThrottle.Release(); }
@@ -346,19 +349,12 @@ var a2s = new A2SQueryService();
     bool finished = await Task.WhenAny(hearing, Task.Delay(TimeSpan.FromMinutes(8))) == hearing;
     Interlocked.Exchange(ref closed, 1);
     if (!finished) Console.WriteLine("hearing: time budget reached - unheard listings stay suspects");
+    heardAccused.AddRange(answered);
 
-    var clearedIds = cleared.Select(s => s.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
-    suspects.RemoveAll(x => clearedIds.Contains(x.Server.Id));
-    foreach (var srv in cleared)
-    {
-        convicted.Remove(srv.Id);
-        byId[srv.Id] = srv;
-    }
-
-    // Everything still convicted is flagged now, unqueried.
+    // Everything convicted is flagged now, unqueried; the motion check can still clear it.
     foreach (var (id, reason) in convicted) suspects.Add((byId[id], reason));
     Console.WriteLine($"hearing: {accused.Count} accused listing(s) claiming players asked for a player list, " +
-                      $"{cleared.Count} cleared by a real list; {suspects.Count} suspect(s) so far");
+                      $"{heardAccused.Count} answered with 5+ names (re-checked for motion later); {suspects.Count} suspect(s) so far");
 }
 
 var candidates = byId.Values.Where(s => !convicted.ContainsKey(s.Id)).ToList();
@@ -434,16 +430,16 @@ await Task.WhenAll(candidates.Select(async srv =>
             // happens later, and only when its IP/subnet is dense with fellow suspects -
             // a lone server that hides its player list survives, a rack of fake-populated
             // listings does not.
-            int listed = await a2s.QueryPlayerListCountAsync(srv.Ip, srv.EffectiveQueryPort, timeoutMs: 1500);
+            var (listed, durations) = await a2s.QueryPlayerListAsync(srv.Ip, srv.EffectiveQueryPort, timeoutMs: 1500);
             // Never downgrade within a run: a lost exchange must not erase a list already heard.
-            srv.PlayerListCount = Math.Max(srv.PlayerListCount, listed);
-            if (srv.HasRealPlayerList) listed = srv.PlayerListCount;
+            srv.RecordListSample(listed, durations, DateTime.UtcNow);
+            if (srv.HasListEntries) listed = srv.PlayerListCount;
             // ANSWERED with nobody = the fake signature. Silence on one check proves nothing on
             // its own - a lost exchange looks the same - so every short or silent claimer is
             // re-heard calmly below, and only a failure that repeats over 5+ minutes counts
             // (R5b). (Much of the "silence" earlier versions excused was really the split-reply
             // bug hiding every busy server's list; with that fixed, real servers answer.)
-            if (!srv.HasRealPlayerList)
+            if (!srv.HasListEntries)
             {
                 srv.FailedListChecks = 1;
                 srv.FirstFailedListCheckAt = DateTime.UtcNow;
@@ -486,13 +482,13 @@ await Task.WhenAll(candidates.Select(async srv =>
         await calm.WaitAsync();
         try
         {
-            int listed = await a2s.QueryPlayerListCountAsync(srv.Ip, srv.EffectiveQueryPort, timeoutMs: 2500);
+            var (listed, durations) = await a2s.QueryPlayerListAsync(srv.Ip, srv.EffectiveQueryPort, timeoutMs: 2500);
             if (listed < 0)
             {
-                listed = await a2s.QueryPlayerListCountAsync(srv.Ip, srv.EffectiveQueryPort, timeoutMs: 2500);
+                (listed, durations) = await a2s.QueryPlayerListAsync(srv.Ip, srv.EffectiveQueryPort, timeoutMs: 2500);
             }
-            srv.PlayerListCount = Math.Max(srv.PlayerListCount, listed);
-            if (srv.HasRealPlayerList) listed = srv.PlayerListCount;
+            srv.RecordListSample(listed, durations, DateTime.UtcNow);
+            if (srv.HasListEntries) listed = srv.PlayerListCount;
             else srv.FailedListChecks++;
             Interlocked.Increment(ref reheard);
             if (listed >= 0 && listed < 5)
@@ -505,6 +501,88 @@ await Task.WhenAll(candidates.Select(async srv =>
         finally { calm.Release(); }
     }));
     Console.WriteLine($"calm re-hearing: {reheard} short/silent claimers re-queried, {caught} answered-with-nobody");
+}
+
+
+// R1c: motion check - the second sample. Every listing that answered 5+ names (the storm's
+// claimers and the hearing's accused) is asked again at least 5 minutes after its first
+// sample - past any cache step - and the two are compared (A2SQueryService.CompareSamples):
+//   - the same players' online times grew by the time that passed -> real players, proven;
+//   - the identical list came back -> frozen (flagged by R5c unless proven some other way).
+// Measured live in October 2026: every real server tested advanced (officials, KarmaKrew,
+// Rearmed US4, DayZed.GG, the real MIDNIGHT/PODPIVAS hosts behind a 100s cache), while the
+// 127/127 farms on 179.254.174.x, 89.111.143.x and 195.208.21.127 stayed frozen for 5 minutes.
+{
+    var toCheck = verified.Where(s => s.ListSample != null && !s.ListMoves)
+        .Concat(heardAccused.Where(s => !s.ListMoves))
+        .Distinct()
+        .ToList();
+
+    using var motionThrottle = new SemaphoreSlim(128);
+    int closedMotion = 0;
+    var motion = Task.WhenAll(toCheck.Select(async srv =>
+    {
+        var due = (srv.ListSampleAt ?? DateTime.UtcNow) + TimeSpan.FromMinutes(5) - DateTime.UtcNow;
+        if (due > TimeSpan.Zero) await Task.Delay(due);
+
+        await motionThrottle.WaitAsync();
+        try
+        {
+            if (Volatile.Read(ref closedMotion) != 0) return;
+            var (listed, durations) = await a2s.QueryPlayerListAsync(srv.Ip, srv.EffectiveQueryPort, timeoutMs: 2500);
+            if (Volatile.Read(ref closedMotion) != 0) return;
+            srv.RecordListSample(listed, durations, DateTime.UtcNow);
+        }
+        catch { }
+        finally { motionThrottle.Release(); }
+    }));
+    bool motionDone = await Task.WhenAny(motion, Task.Delay(TimeSpan.FromMinutes(10))) == motion;
+    Interlocked.Exchange(ref closedMotion, 1);
+
+    // Accused listings whose players really kept playing are cleared: out of the suspects and
+    // verified like any other listing.
+    var cleared = heardAccused.Where(s => s.ListMoves).ToList();
+    var clearedIds = cleared.Select(s => s.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+    suspects.RemoveAll(x => clearedIds.Contains(x.Server.Id));
+    await Task.WhenAll(cleared.Select(async srv =>
+    {
+        convicted.Remove(srv.Id);
+        try
+        {
+            var live = await a2s.QueryServerAsync(srv.Ip, srv.EffectiveQueryPort, timeoutMs: 2500);
+            if (!live.IsOnline)
+            {
+                srv.ModsVerified = false;
+                unverified.Add(srv);
+                return;
+            }
+            srv.PopVerified = true;
+            srv.CurrentPlayers = live.CurrentPlayers > 127 ? 0 : live.CurrentPlayers;
+            srv.MaxPlayers = live.MaxPlayers;
+            if (!string.IsNullOrWhiteSpace(live.Map)) srv.Map = live.Map;
+            if (!string.IsNullOrWhiteSpace(live.Name)) srv.Name = live.Name;
+            if (!string.IsNullOrWhiteSpace(live.GameVersion)) srv.GameVersion = live.GameVersion;
+            srv.RequiresPassword = live.RequiresPassword;
+            if (live.PerspectiveKnown)
+            {
+                srv.IsFirstPersonOnly = live.IsFirstPersonOnly;
+                srv.PerspectiveKnown = true;
+            }
+            var (ids, _, ok) = await a2s.QueryModsAsync(srv.Ip, srv.EffectiveQueryPort, timeoutMs: 2500);
+            srv.ModsVerified = ok;
+            if (ok) srv.RequiredMods = ids;
+            verified.Add(srv);
+        }
+        catch
+        {
+            srv.ModsVerified = false;
+            unverified.Add(srv);
+        }
+    }));
+
+    Console.WriteLine($"motion check: {toCheck.Count} list(s) re-sampled 5+ min later - {toCheck.Count(s => s.ListMoves)} moving (real players), " +
+                      $"{toCheck.Count(s => s.ListFrozen)} frozen; {cleared.Count} accused listing(s) cleared" +
+                      (motionDone ? "" : " (time budget reached - unchecked ones stay unproven)"));
 }
 
 
@@ -647,7 +725,7 @@ Console.WriteLine($"unverified after farm-subnet rule: {keptUnverified.Count} (f
 // the claim, so a server whose crowd simply left is not judged. Official servers are exempt.
 // Runs before the copy rule so a flagged farm can never be anyone's "original".
 {
-    var pending = verifiedKept.Where(s => s.FailedListChecks >= 2 && !s.HasRealPlayerList && !s.IsOfficial).ToList();
+    var pending = verifiedKept.Where(s => s.FailedListChecks >= 2 && !s.HasListEntries && !s.IsOfficial).ToList();
     var confirmed = new ConcurrentBag<Server>();
     using var finalThrottle = new SemaphoreSlim(64);
     int closed5b = 0;
@@ -666,9 +744,9 @@ Console.WriteLine($"unverified after farm-subnet rule: {keptUnverified.Count} (f
             var live = await a2s.QueryServerAsync(srv.Ip, srv.EffectiveQueryPort, timeoutMs: 2500);
             if (!live.IsOnline || live.CurrentPlayers < 20) return; // claim gone - no judgment
 
-            int listed = await a2s.QueryPlayerListCountAsync(srv.Ip, srv.EffectiveQueryPort, timeoutMs: 2500);
-            srv.PlayerListCount = Math.Max(srv.PlayerListCount, listed);
-            if (!srv.HasRealPlayerList && Volatile.Read(ref closed5b) == 0) confirmed.Add(srv);
+            var (listed, durations) = await a2s.QueryPlayerListAsync(srv.Ip, srv.EffectiveQueryPort, timeoutMs: 2500);
+            srv.RecordListSample(listed, durations, DateTime.UtcNow);
+            if (!srv.HasListEntries && Volatile.Read(ref closed5b) == 0) confirmed.Add(srv);
         }
         catch { }
         finally { finalThrottle.Release(); }
@@ -681,6 +759,21 @@ Console.WriteLine($"unverified after farm-subnet rule: {keptUnverified.Count} (f
     verifiedKept = verifiedKept.Where(s => !noList.Contains(s.Id)).ToList();
     Console.WriteLine($"no-player-list: {pending.Count} claimer(s) failed twice, {noList.Count} failed a third time 5+ min later and were flagged" +
                       (done5b ? "" : " (time budget reached - unchecked ones stay published)"));
+}
+
+
+// R5c: frozen player list. The list came back identical 5+ minutes apart while the server
+// claimed 20+ players - nobody's online time moved, so nobody is playing. This is the replay
+// farm that defeated the one-snapshot proof: 63 listings on 179.254.174.x and the 127/127
+// "MIDNIGHT PLUS" / "Rearmed EU Main" copies on 89.111.x and 195.208.21.127 (October 2026), all
+// frozen for five minutes, while the real servers of those names advanced normally. Official
+// servers are exempt; a list that moved at any point this run is never frozen.
+{
+    var frozen = verifiedKept.Where(s => s.ListFrozen && !s.ListMoves && s.CurrentPlayers >= 20 && !s.IsOfficial).ToList();
+    foreach (var s in frozen) suspects.Add((s, "frozen-list"));
+    var frozenIds = frozen.Select(s => s.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+    verifiedKept = verifiedKept.Where(s => !frozenIds.Contains(s.Id)).ToList();
+    Console.WriteLine($"frozen-list: flagged {frozen.Count} listing(s) whose player list never moved over 5+ minutes");
 }
 
 

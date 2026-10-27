@@ -18,7 +18,9 @@ permissions:
 jobs:
   feed:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    # The motion check waits 5+ minutes between player-list samples, on top of the hearing and
+    # the verification pass, so a run takes longer than it used to.
+    timeout-minutes: 75
     # deploy-pages publishes into this environment; it is what the Pages URL hangs off.
     environment:
       name: github-pages

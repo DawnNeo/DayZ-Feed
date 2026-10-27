@@ -421,8 +421,65 @@ namespace DayZLauncher.Models
         [JsonIgnore]
         public int PlayerListCount { get; set; } = -2;
 
+        /// <summary>The server answered its player list with 5+ names at least once this run.
+        /// An answer only - a replayed snapshot looks exactly like this (see ListMoves).</summary>
         [JsonIgnore]
-        public bool HasRealPlayerList => PlayerListCount >= 5;
+        public bool HasListEntries => PlayerListCount >= 5;
+
+        /// <summary>
+        /// Proof of real players: two samples of the list minutes apart show the same players'
+        /// online times grown by the time that passed. A single list is NOT proof - the October
+        /// 2026 farms on 179.254.174.x / 89.111.143.x answered 70-119 names that never changed
+        /// for five minutes. Exempts a listing from every farm, clone and population verdict.
+        /// </summary>
+        [JsonIgnore]
+        public bool HasRealPlayerList => ListMoves;
+
+        /// <summary>The first list sample with 5+ names, kept so a later one can be compared.</summary>
+        [JsonIgnore]
+        public System.Collections.Generic.List<float>? ListSample { get; set; }
+
+        [JsonIgnore]
+        public DateTime? ListSampleAt { get; set; }
+
+        [JsonIgnore]
+        public bool ListMoves { get; set; }
+
+        /// <summary>The list stayed identical for 4+ minutes while claiming players.</summary>
+        [JsonIgnore]
+        public bool ListFrozen { get; set; }
+
+        /// <summary>
+        /// Files one player-list answer: keeps the best count (a lost exchange never erases one
+        /// already heard), stores the first 5+ sample, and compares later ones against it - the
+        /// window only grows, so a cache step can't hide motion for long.
+        /// </summary>
+        public void RecordListSample(int count, System.Collections.Generic.List<float> durations, DateTime atUtc)
+        {
+            lock (this)
+            {
+                PlayerListCount = Math.Max(PlayerListCount, count);
+                if (count < 5 || durations.Count < 5) return;
+
+                if (ListSample == null || ListSampleAt == null)
+                {
+                    ListSample = durations;
+                    ListSampleAt = atUtc;
+                    return;
+                }
+
+                switch (Services.A2SQueryService.CompareSamples(ListSample, ListSampleAt.Value, durations, atUtc))
+                {
+                    case Services.A2SQueryService.ListMotion.Advancing:
+                        ListMoves = true;
+                        ListFrozen = false;
+                        break;
+                    case Services.A2SQueryService.ListMotion.Frozen:
+                        if (!ListMoves) ListFrozen = true;
+                        break;
+                }
+            }
+        }
 
         /// <summary>Player-list checks this run that came back silent or short while the server
         /// claimed 20+ players, and when the first of them happened. Three such failures spread

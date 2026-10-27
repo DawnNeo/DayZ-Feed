@@ -395,20 +395,74 @@ namespace DayZLauncher.Services
         /// so the result is a floor, not the population). Returns -1 when there is no valid
         /// reply at all.
         /// </summary>
-        public async Task<int> QueryPlayerListCountAsync(string ipAddress, int queryPort, int timeoutMs = 2000, int attempts = 2)
+        public async Task<int> QueryPlayerListCountAsync(string ipAddress, int queryPort, int timeoutMs = 2000, int attempts = 2) =>
+            (await QueryPlayerListAsync(ipAddress, queryPort, timeoutMs, attempts)).Count;
+
+        /// <summary>
+        /// The player list: Count is -1 for no reply, otherwise the entries (0 for a generated
+        /// list), and Durations holds each entry's online time in seconds. Two samples of the
+        /// durations taken minutes apart are what tell real players from a replayed snapshot -
+        /// see <see cref="CompareSamples"/>.
+        /// </summary>
+        public async Task<(int Count, System.Collections.Generic.List<float> Durations)> QueryPlayerListAsync(
+            string ipAddress, int queryPort, int timeoutMs = 2000, int attempts = 2)
         {
             for (int attempt = 0; attempt < Math.Max(1, attempts); attempt++)
             {
-                int count = await QueryPlayerListOnceAsync(ipAddress, queryPort, timeoutMs);
-                if (count >= 0) return count;
+                var result = await QueryPlayerListOnceAsync(ipAddress, queryPort, timeoutMs);
+                if (result.Count >= 0) return result;
             }
-            return -1;
+            return (-1, new System.Collections.Generic.List<float>());
         }
 
 
-        private async Task<int> QueryPlayerListOnceAsync(string ipAddress, int queryPort, int timeoutMs)
+        public enum ListMotion { Unknown, Advancing, Frozen }
+
+        /// <summary>
+        /// Did the same players keep playing between two samples? Real players' online times all
+        /// grow by the time that passed (or by a cache step near it: some RU hosts answer from a
+        /// cache that refreshes every ~100s, so 151s reads as +200s). The best single shift that
+        /// lines the two samples up is found by voting; real servers measured live line up 85-100%
+        /// of entries at that shift (officials, KarmaKrew, Rearmed US4, DayZed.GG, the real
+        /// MIDNIGHT/PODPIVAS hosts). Replay fakes return the identical snapshot - shift 0, 100%
+        /// fit - for five minutes and more (179.254.174.x, 89.111.143.x, 195.208.21.127 in October
+        /// 2026, each "listing" 70-119 players at 127/127). Frozen is only called past 240s, beyond
+        /// any cache step; under 120s apart nothing is concluded.
+        /// </summary>
+        public static ListMotion CompareSamples(
+            System.Collections.Generic.IReadOnlyList<float> earlier, DateTime earlierAtUtc,
+            System.Collections.Generic.IReadOnlyList<float> later, DateTime laterAtUtc)
         {
-            if (!IPAddress.TryParse(ipAddress, out var ip)) return -1;
+            double elapsed = (laterAtUtc - earlierAtUtc).TotalSeconds;
+            if (earlier.Count < 5 || later.Count < 5 || elapsed < 120) return ListMotion.Unknown;
+
+            var votes = new System.Collections.Generic.Dictionary<int, int>();
+            foreach (var x in later)
+            {
+                foreach (var y in earlier)
+                {
+                    int shift = (int)Math.Round((x - y) / 5.0) * 5;
+                    if (shift < 0) continue;
+                    votes[shift] = votes.TryGetValue(shift, out var v) ? v + 1 : 1;
+                }
+            }
+            if (votes.Count == 0) return ListMotion.Unknown;
+
+            int best = votes.OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key).First().Key;
+            int fit = later.Count(x => earlier.Any(y => Math.Abs(x - y - best) <= 3));
+            double share = fit / (double)later.Count;
+
+            if (best == 0 && share >= 0.9 && elapsed >= 240) return ListMotion.Frozen;
+            if (best > 0 && share >= 0.6 && Math.Abs(best - elapsed) <= 110) return ListMotion.Advancing;
+            return ListMotion.Unknown;
+        }
+
+
+        private async Task<(int Count, System.Collections.Generic.List<float> Durations)> QueryPlayerListOnceAsync(
+            string ipAddress, int queryPort, int timeoutMs)
+        {
+            var none = (-1, new System.Collections.Generic.List<float>());
+            if (!IPAddress.TryParse(ipAddress, out var ip)) return none;
             var endPoint = new IPEndPoint(ip, queryPort);
             using var udpClient = new UdpClient();
 
@@ -420,7 +474,7 @@ namespace DayZLauncher.Services
 
 
                 byte[]? data = await ReceiveWithTimeoutAsync(udpClient, timeoutMs, allowSplit: true);
-                if (data == null || data.Length < 5) return -1;
+                if (data == null || data.Length < 5) return none;
 
 
                 for (int round = 0; round < 2 && data.Length >= 9 &&
@@ -429,12 +483,12 @@ namespace DayZLauncher.Services
                     Buffer.BlockCopy(data, 5, request, 5, 4);
                     await udpClient.SendAsync(request, request.Length, endPoint);
                     data = await ReceiveWithTimeoutAsync(udpClient, timeoutMs, allowSplit: true);
-                    if (data == null || data.Length < 5) return -1;
+                    if (data == null || data.Length < 5) return none;
                 }
 
 
                 byte[]? payload = await ReassembleAsync(udpClient, data, timeoutMs);
-                if (payload == null || payload.Length < 6 || payload[4] != 0x44) return -1;
+                if (payload == null || payload.Length < 6 || payload[4] != 0x44) return none;
 
 
                 // Count the entries actually present ([index u8][name cstr][score i32][time f32])
@@ -451,12 +505,12 @@ namespace DayZLauncher.Services
                     pos += 8;
                     entries++;
                 }
-                return IsFabricatedList(durations) ? 0 : entries;
+                return IsFabricatedList(durations) ? (0, new System.Collections.Generic.List<float>()) : (entries, durations);
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"A2S player query error on {ipAddress}:{queryPort}: {ex.Message}");
-                return -1;
+                return none;
             }
         }
 

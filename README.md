@@ -51,6 +51,7 @@ history. Launchers older than 1.0.2 only read `servers`, so they never see suspe
 | `farm-clones` | The address has 50+ listings and at least half reuse a name that 3+ other addresses also use. |
 | `farm-full-house` | The address has 50+ listings and every one with players claims to be exactly full. |
 | `farm-dense` | The address has 50+ listings and 10+ of them have players. No proven-real address has more than 8 listings. |
+| `frozen-list` | Claims 20+ players, but its player list came back identical 5+ minutes later: nobody's online time moved (official servers exempt). |
 | `no-player-list` | Claims 20+ players but produced no real player list on three checks spread over 5+ minutes (official servers exempt). |
 | `clone-no-list` | Its name is on 3+ addresses, it claims 20+ players but can't produce a player list, and an older listing with the same name exists (that original is never flagged by this rule). |
 | `name-flood` | One of 40+ listings sharing a generated name pattern across 10+ subnets. |
@@ -63,10 +64,13 @@ The farm rules judge a whole **address** and only kick in at high density, becau
 machine runs dozens of DayZ servers on one IP. That density gate is what protects the real
 server that a clone farm copies: the original sits on an address with a handful of listings.
 
-**A real player list clears a listing.** Any accused listing that claims players is asked for
-its player list, and five or more entries clears it of every farm, clone and population
-verdict (blocklist entries excepted). No fake sampled has ever produced one, while every
-official server did.
+**Real players clear a listing.** One player list proves nothing: some fakes replay a frozen
+snapshot of 70–119 names. So every listing that answers with 5+ names is asked again at least
+5 minutes later. If the same players' online times grew by the time that passed (or by a cache
+step near it; some hosts refresh every ~100 s), the listing is proven real and cleared of every
+farm, clone and population verdict (blocklist entries excepted), and published with
+`"proven": true`. If the list is identical, it's flagged `frozen-list`. Measured live in
+October 2026: 18 of 18 real servers advanced, and 71 of 71 suspected replay listings stayed frozen.
 
 ## blocklist.txt
 
@@ -104,7 +108,7 @@ Each row:
 | `cc` | Country code (optional). |
 | `fpp` | `true` = first-person only (optional; missing means unknown). |
 | `since` | When this listing was first recorded in the history, ISO 8601 UTC (optional). |
-| `proven` | `true` when the server produced a real player list (5+ entries) this run (optional). |
+| `proven` | `true` when two player-list samples 5+ minutes apart showed the same players still playing (optional). |
 | `reason` | Suspects only. |
 
 ## Population history (`data` branch)
