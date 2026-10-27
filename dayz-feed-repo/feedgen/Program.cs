@@ -779,6 +779,29 @@ Console.WriteLine($"unverified after farm-subnet rule: {keptUnverified.Count} (f
 }
 
 
+// R5d: siblings of confirmed replays. The replay farms answer the runner on only a few of their
+// listings - 10 of 62 on 179.254.174.x in October 2026 - and the rest report 0 players to the
+// master list while answering players with 127/127, so nothing else ever examines them. An
+// address with 2+ listings confirmed frozen this run, and none on it seen moving, is a replay
+// farm: its listings the runner couldn't reach are flagged with it. A real server sharing such
+// an address keeps its proof the moment its own list is seen moving.
+{
+    var frozenIps = suspects.Where(x => x.Reason == "frozen-list")
+        .GroupBy(x => x.Server.Ip, StringComparer.Ordinal)
+        .Where(g => g.Count() >= 2)
+        .Select(g => g.Key)
+        .ToHashSet(StringComparer.Ordinal);
+    var provenIps = verifiedKept.Where(s => s.HasRealPlayerList).Select(s => s.Ip).ToHashSet(StringComparer.Ordinal);
+    frozenIps.ExceptWith(provenIps);
+
+    var siblings = keptUnverified.Where(s => frozenIps.Contains(s.Ip) && !s.HasRealPlayerList).ToList();
+    foreach (var s in siblings) suspects.Add((s, "frozen-sibling"));
+    var siblingIds = siblings.Select(s => s.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+    keptUnverified = keptUnverified.Where(s => !siblingIds.Contains(s.Id)).ToList();
+    Console.WriteLine($"frozen-sibling: {frozenIps.Count} replay address(es), flagged {siblings.Count} unreached listing(s) on them");
+}
+
+
 // When each listing was first recorded, from the population history (30 days deep). Used to
 // tell an original from its copies, and published as "since" so launchers can do the same.
 // Source: each history entry's permanent "fs" stamp (unix minute, written once and never
@@ -955,6 +978,9 @@ static Dictionary<string, string> FindFarmIps(List<Server> pool, bool measured)
 //         launcher can distinguish verified-vanilla from unknown.
 var all = verifiedKept.Concat(keptUnverified).OrderByDescending(s => s.CurrentPlayers).ToList();
 
+// A measured crowd of 20+ whose player list was never seen moving this run.
+static bool HeldBack(Server s) => s.CurrentPlayers >= 20 && !s.HasRealPlayerList && !s.IsOfficial;
+
 object Row(Server s, string? reason) => new
 {
     id = s.Id,
@@ -967,12 +993,16 @@ object Row(Server s, string? reason) => new
     // so the feed publishes 0 for them - clients rank on verified reality only, and each
     // user's local sweep supplies the real number the moment the row is looked at. Every
     // suspect's count is zeroed too: if one is revealed, the launcher's own query gives the truth.
-    players = reason == null && s.PopVerified ? s.CurrentPlayers : 0,
-    // Unverified only: what the master list says it has. NOT a population - the runner reaches
-    // only ~20% of servers (many hosts drop datacenter traffic, real ones and fakes alike), so
-    // this tells launchers which unreachable listings claim a crowd and need checking from the
-    // player's own connection before any count is shown.
-    claimed = reason == null && !s.PopVerified && s.CurrentPlayers > 0 ? s.CurrentPlayers : (int?)null,
+    // A crowd of 20+ is only published once its players were seen moving (the motion check):
+    // the replay farms answer the runner too, and when the second sample is lost they were left
+    // neither flagged nor proven and went out as "verified 127/127" at the top of every list.
+    // Official servers and smaller counts are published as measured.
+    players = reason == null && s.PopVerified && !HeldBack(s) ? s.CurrentPlayers : 0,
+    // What the listing claims when it isn't published as a population: unverified rows (the
+    // runner reaches only ~20% of servers - many hosts drop datacenter traffic, real ones and
+    // fakes alike) and held-back unproven crowds. Launchers use it to decide which listings to
+    // check from the player's own connection before any count is shown.
+    claimed = reason == null && (!s.PopVerified || HeldBack(s)) && s.CurrentPlayers > 0 ? s.CurrentPlayers : (int?)null,
     maxPlayers = s.MaxPlayers,
     official = s.IsOfficial,
     passworded = s.RequiresPassword,

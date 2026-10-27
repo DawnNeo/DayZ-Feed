@@ -52,6 +52,7 @@ history. Launchers older than 1.0.2 only read `servers`, so they never see suspe
 | `farm-full-house` | The address has 50+ listings and every one with players claims to be exactly full. |
 | `farm-dense` | The address has 50+ listings and 10+ of them have players. No proven-real address has more than 8 listings. |
 | `frozen-list` | Claims 20+ players, but its player list came back identical 5+ minutes later: nobody's online time moved (official servers exempt). |
+| `frozen-sibling` | The runner couldn't reach it, but its address has 2+ listings caught frozen and none seen moving: a replay farm whose other listings hide behind "0 players" in the master list. |
 | `no-player-list` | Claims 20+ players but produced no real player list on three checks spread over 5+ minutes (official servers exempt). |
 | `clone-no-list` | Its name is on 3+ addresses, it claims 20+ players but can't produce a player list, and an older listing with the same name exists (that original is never flagged by this rule). |
 | `name-flood` | One of 40+ listings sharing a generated name pattern across 10+ subnets. |
@@ -101,9 +102,9 @@ Each row:
 |---|---|
 | `id` | `ip:gamePort`, the key everything uses. |
 | `name`, `ip`, `port`, `queryPort`, `map`, `version` | From the server's own answer when verified, otherwise from the master list. |
-| `players`, `maxPlayers` | `players` is the measured count for verified rows and `0` otherwise, including all suspects. |
+| `players`, `maxPlayers` | `players` is the measured count for verified rows and `0` otherwise, including all suspects. A verified row claiming 20+ whose player list was never seen moving is held back too: `0`, with the count in `claimed`. |
 | `verified` | The server answered the runner directly. Only ~20% do: many hosts drop datacenter traffic, real servers and fakes alike. |
-| `claimed` | Unverified rows only: the player count the master list reports. Not a population; launchers use it to decide which unreachable servers to check from the player's own connection (optional). |
+| `claimed` | Unverified and held-back rows: the player count the server reports. Not a population; launchers use it to decide which unreachable servers to check from the player's own connection (optional). |
 | `official`, `passworded` | |
 | `mods` | Workshop ids. **Present only when the mods query answered**, so `[]` means verified vanilla and a missing field means unknown. |
 | `cc` | Country code (optional). |
