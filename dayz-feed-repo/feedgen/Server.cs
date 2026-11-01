@@ -98,7 +98,7 @@ namespace DayZLauncher.Models
         private bool _perspectiveKnown;
 
 
-        /// <summary>True when the server runs first-person only (it advertises the "no3rd"
+        /// <summary>True when the server runs first-person only (it does NOT advertise the "no3rd"
         /// tag). Only meaningful once <see cref="PerspectiveKnown"/> is set.</summary>
         public bool IsFirstPersonOnly
         {

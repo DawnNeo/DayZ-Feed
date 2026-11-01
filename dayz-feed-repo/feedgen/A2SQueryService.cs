@@ -272,9 +272,11 @@ namespace DayZLauncher.Services
             }
 
 
-            // Camera perspective: DayZ advertises "no3rd" when third person is disabled, so a
-            // keywords answer that lacks it is a positive "3PP allowed" statement, not silence.
-            server.IsFirstPersonOnly = System.Text.RegularExpressions.Regex.IsMatch(keywords, @"\bno3rd\b");
+            // Camera perspective: since DayZ's thirdPersonView setting replaced disable3rdPerson,
+            // servers advertise "no3rd" when third person is ON - backwards from its name (checked
+            // on a local server both ways and against live servers named 3PP / 1PP). So a keywords
+            // answer that LACKS it is the first-person-only one.
+            server.IsFirstPersonOnly = !System.Text.RegularExpressions.Regex.IsMatch(keywords, @"\bno3rd\b");
             server.PerspectiveKnown = true;
 
 

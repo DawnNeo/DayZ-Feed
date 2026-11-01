@@ -11,7 +11,8 @@ using DayZLauncher.Services;
 // v4: two optional per-row fields. "cc" - country code resolved from the server's IP against
 // the public-domain (CC0/PDDL) geo-whois-asn-country dataset, downloaded fresh each run, so
 // the launcher's region filter needs no keys and no per-user lookups. "fpp" - true when the
-// server's gametype tags carry "no3rd" (first-person only); present only when tags were seen,
+// server is first-person only, which DayZ now signals by LEAVING OUT "no3rd" (the tag is
+// backwards since the thirdPersonView setting - see A2SQueryService); present only when tags were seen,
 // so absence means "unknown", never "3PP".
 //
 // v2 policy change: a server the runner cannot reach is NOT dropped anymore. Datacenter
@@ -89,9 +90,10 @@ async Task<int> Enumerate(string filter)
                              System.Text.RegularExpressions.Regex.IsMatch(gametype, @"shard\d{3}(,|$)") &&
                              !gametype.Contains("external", StringComparison.OrdinalIgnoreCase) &&
                              !gametype.Contains("privHive", StringComparison.OrdinalIgnoreCase),
-                // Perspective rides in the same tags: "no3rd" = first person only. Tags being
-                // present at all is what makes "no no3rd" a real 3PP statement, not silence.
-                IsFirstPersonOnly = System.Text.RegularExpressions.Regex.IsMatch(gametype, @"\bno3rd\b"),
+                // Perspective rides in the same tags. DayZ now sends "no3rd" when third person is
+                // ON (backwards - see A2SQueryService), so its absence means first person only.
+                // Tags being present at all is what makes that absence a statement, not silence.
+                IsFirstPersonOnly = !System.Text.RegularExpressions.Regex.IsMatch(gametype, @"\bno3rd\b"),
                 PerspectiveKnown = gametype.Length > 0,
             };
             added++;
