@@ -289,6 +289,11 @@ namespace DayZLauncher.Models
         }
 
 
+        /// <summary>The player count Steam's master list advertised for this listing when it was
+        /// enumerated - kept apart from CurrentPlayers, which the spam checks zero once a claim
+        /// is refused. Published as a suspect's "claimed" so launchers can show what it says.</summary>
+        public int ListedPlayers { get; set; }
+
         // Live fields retrieved via A2S query or BattleMetrics
         public int CurrentPlayers
         {

@@ -84,6 +84,7 @@ async Task<int> Enumerate(string filter)
                 // More players than its own slots is impossible. (More than 127 SLOTS is not:
                 // real servers run 130 and 150 - Rearmed US3 measured 102/130, listing all 102.)
                 CurrentPlayers = players > maxPlayers ? 0 : players,
+                ListedPlayers = players > maxPlayers ? 0 : players,
                 MaxPlayers = maxPlayers,
                 GameVersion = e.TryGetProperty("version", out var v) ? v.GetString() ?? "" : "",
                 IsOfficial = gametype.Length > 0 &&
@@ -1004,7 +1005,12 @@ object Row(Server s, string? reason) => new
     // runner reaches only ~20% of servers - many hosts drop datacenter traffic, real ones and
     // fakes alike) and held-back unproven crowds. Launchers use it to decide which listings to
     // check from the player's own connection before any count is shown.
-    claimed = reason == null && (!s.PopVerified || HeldBack(s)) && s.CurrentPlayers > 0 ? s.CurrentPlayers : (int?)null,
+    // Suspects publish what the master list advertises for them, so a launcher's show-spam view
+    // can rank them the way the in-game browser does. Never shown as a population otherwise:
+    // launchers hide suspects by default and never queue them for checks on this number.
+    claimed = reason != null
+        ? (s.ListedPlayers > 0 ? s.ListedPlayers : (int?)null)
+        : (!s.PopVerified || HeldBack(s)) && s.CurrentPlayers > 0 ? s.CurrentPlayers : (int?)null,
     maxPlayers = s.MaxPlayers,
     official = s.IsOfficial,
     passworded = s.RequiresPassword,
